@@ -1,0 +1,29 @@
+{
+  "name": "code2offer",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Code2Offer(代码转面试):读取完整代码仓库,用 DeepSeek 生成真实面试场景全套材料(项目讲解/百问百答/亮点防守/缺点改进/选型横向对比/HTML报告/模拟排练)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/12334rrr/Code2Offer.git"
+  },
+  "bin": {
+    "code2offer": "dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "generate": "node dist/cli/index.js generate",
+    "rehearse": "node dist/cli/index.js rehearse",
+    "export-prompts": "node dist/cli/index.js export-prompts docs/prompts",
+    "demo": "npm run build && node dist/cli/index.js generate ./example-demo --jd example-demo/jd.txt",
+    "demo:rehearse": "node dist/cli/index.js rehearse ./example-demo/interview-output --count 3",
+    "test": "npm run build && node --test \"dist/tests/*.test.js\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}

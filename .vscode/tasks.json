@@ -1,0 +1,20 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "编译扩展(vscode/)",
+      "type": "shell",
+      "command": "node esbuild.js",
+      "options": { "cwd": "${workspaceFolder}/vscode" },
+      "problemMatcher": []
+    },
+    {
+      "label": "监视扩展改动(vscode/)",
+      "type": "shell",
+      "command": "node esbuild.js --watch",
+      "isBackground": true,
+      "options": { "cwd": "${workspaceFolder}/vscode" },
+      "problemMatcher": []
+    }
+  ]
+}

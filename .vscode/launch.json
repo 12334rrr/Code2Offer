@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "运行扩展(扩展开发宿主)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/vscode"],
+      "outFiles": ["${workspaceFolder}/vscode/dist/**/*.js"],
+      "preLaunchTask": "编译扩展(vscode/)"
+    }
+  ]
+}

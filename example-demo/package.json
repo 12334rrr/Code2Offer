@@ -1,0 +1,10 @@
+{
+  "name": "task-board-api",
+  "version": "1.0.0",
+  "description": "演示用:零依赖 Node.js 任务看板 API(内存存储 + LRU 缓存 + 令牌桶限流)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tests/store.test.js"
+  }
+}

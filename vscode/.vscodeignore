@@ -1,0 +1,8 @@
+# 打包白名单之外全部排除:源码/构建脚本/类型配置/sourcemap/历史包不进 vsix
+src/**
+esbuild.js
+tsconfig.json
+**/*.map
+node_modules/**
+*.vsix
+package-lock.json

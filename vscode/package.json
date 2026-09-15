@@ -1,0 +1,96 @@
+{
+  "name": "code-interview-prep",
+  "displayName": "Code2Offer 代码转面试",
+  "description": "对当前仓库一键生成面试全套材料:项目讲解、百问百答(含横向选型对比)、亮点防守、缺点改进、可搜索自测 HTML 报告。由 DeepSeek 驱动。",
+  "version": "0.3.0",
+  "publisher": "DawnofHope",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/12334rrr/Code2Offer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/12334rrr/Code2Offer/issues"
+  },
+  "homepage": "https://github.com/12334rrr/Code2Offer#readme",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other", "Education"],
+  "keywords": ["面试", "interview", "deepseek", "代码分析", "interview-preparation"],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codeInterviewPrep",
+          "title": "代码转面试",
+          "icon": "media/activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "codeInterviewPrep": [
+        {
+          "id": "codeInterviewPrep.panel",
+          "name": "面试准备",
+          "icon": "media/activitybar.svg",
+          "contextualTitle": "代码转面试"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codeInterviewPrep.generate",
+        "title": "代码转面试:生成面试材料",
+        "icon": "$(play)"
+      },
+      {
+        "command": "codeInterviewPrep.openReport",
+        "title": "代码转面试:打开面试报告",
+        "icon": "$(book)"
+      },
+      {
+        "command": "codeInterviewPrep.openOutput",
+        "title": "代码转面试:打开产物文件夹",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "codeInterviewPrep.openSettings",
+        "title": "代码转面试:配置模型",
+        "icon": "$(gear)"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "codeInterviewPrep.generate",
+          "group": "navigation@99",
+          "when": "explorerResourceIsFolder"
+        }
+      ],
+      "view/item/context": []
+    },
+    "configuration": {
+      "title": "代码转面试",
+      "properties": {
+        "codeInterviewPrep.model": {
+          "type": "string",
+          "default": "",
+          "description": "DeepSeek 模型名,留空则使用 .env 中的 DEEPSEEK_MODEL(不可用时自动回退 deepseek-chat)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "typecheck": "node ../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "vscode:prepublish": "npm run typecheck && npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.21.5"
+  }
+}
