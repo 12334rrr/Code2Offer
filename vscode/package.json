@@ -2,7 +2,7 @@
   "name": "code-interview-prep",
   "displayName": "Code2Offer 代码转面试",
   "description": "对当前仓库一键生成面试全套材料:项目讲解、百问百答(含横向选型对比)、亮点防守、缺点改进、可搜索自测 HTML 报告。由 DeepSeek 驱动。",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "DawnofHope",
   "repository": {
     "type": "git",
@@ -59,6 +59,25 @@
         "command": "codeInterviewPrep.openSettings",
         "title": "代码转面试:配置模型",
         "icon": "$(gear)"
+      },
+      {
+        "command": "codeInterviewPrep.cancelTask",
+        "title": "代码转面试:取消该任务(缓存保留)",
+        "icon": "$(close)"
+      },
+      {
+        "command": "codeInterviewPrep.dismissTask",
+        "title": "代码转面试:从列表移除该记录",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "codeInterviewPrep.cancelAll",
+        "title": "代码转面试:取消全部运行中任务",
+        "icon": "$(close-all)"
+      },
+      {
+        "command": "codeInterviewPrep.dismissAll",
+        "title": "代码转面试:清空已完成的任务记录"
       }
     ],
     "menus": {
@@ -69,7 +88,34 @@
           "when": "explorerResourceIsFolder"
         }
       ],
-      "view/item/context": []
+      "view/title": [
+        {
+          "command": "codeInterviewPrep.generate",
+          "when": "view == codeInterviewPrep.panel",
+          "group": "navigation@1"
+        },
+        {
+          "command": "codeInterviewPrep.cancelAll",
+          "when": "view == codeInterviewPrep.panel && codeInterviewPrep.hasRunning",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "codeInterviewPrep.cancelTask",
+          "when": "view == codeInterviewPrep.panel && viewItem == cip-task-running",
+          "group": "inline@1"
+        },
+        {
+          "command": "codeInterviewPrep.dismissTask",
+          "when": "view == codeInterviewPrep.panel && viewItem == cip-task-finished",
+          "group": "inline@1"
+        }
+      ],
+      "commandPalette": [
+        { "command": "codeInterviewPrep.cancelTask", "when": "false" },
+        { "command": "codeInterviewPrep.dismissTask", "when": "false" }
+      ]
     },
     "configuration": {
       "title": "代码转面试",

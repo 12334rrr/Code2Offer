@@ -270,6 +270,15 @@ export const STAGE2_FLAG_REWRITE_SYSTEM = `你是技术面试题修订员。给�
 4. 沿用原题代码依据引用;校验结论中给出的精确行号可直接引用。
 只输出严格 JSON:{"答案要点":["..."]}`;
 
+export function stage2FlagRewriteUser(question: string, points: string[], verifyNote: string, excerptsText: string): string {
+  return [
+    `# 题目\n${question}`,
+    `# 当前答案要点(已被校验判定与代码矛盾)\n${points.map((a, i) => `${i + 1}. ${a}`).join('\n')}`,
+    `# 校验结论(权威,必须以此改正主答案)\n${verifyNote}`,
+    `# 引用处代码原文\n${excerptsText}`,
+  ].join('\n\n');
+}
+
 /* ================= 阶段 5:总装(叙述性产物) ================= */
 
 export const STAGE5_NARRATIVE_SYSTEM = `你是求职教练兼资深面试官。基于项目知识卡与模块理解卡,为候选人撰写《项目讲解》的叙述部分(Markdown)。这是候选人在真实面试中要讲的内容,必须:
@@ -343,6 +352,28 @@ ${answer.slice(0, 3000)}
 
 请输出评分 JSON。`;
 }
+
+/* ================= 阶段 7:自评评委(evaluate 命令,四只眼睛) ================= */
+
+export const EVAL_FACT_SYSTEM = `你是苛刻的技术评委。给你若干面试题(含答案要点与代码依据)及引用处代码原文。逐题评估:
+1) 引用真实性:引用的 文件:行号 与所述内容是否一致(0-10);
+2) 要点一致性:答案要点是否与代码事实相符、无编造(0-10)。
+只输出严格 JSON:{"items":[{"id":"...","cite":0,"consistency":0,"problem":"具体问题"}],"summary":"总体评价与最需改进点"}`;
+
+export const EVAL_CMP_SYSTEM = `你是苛刻的技术评委。给你若干带"横向对比块"的面试题(候选方案/维度/对比表/结论)。评估:
+1) 维度充分性:维度是否≥3且切中要害(0-10);
+2) 客观性:是否包含所选方案的缺点,有无偏袒(0-10);
+3) 边界明确:结论是否说清"什么场景应反过来选另一个"(0-10)。
+只输出严格 JSON:{"items":[{"id":"...","dims":0,"objectivity":0,"boundary":0,"problem":"..."}],"summary":"总体评价与最需改进点"}`;
+
+export const EVAL_NARRATIVE_SYSTEM = `你是苛刻的模拟面试官。给你候选人的四份面试材料(项目讲解/亮点防守/缺点改进/设计决策对比)。评估:
+1) STAR可信度:项目讲解是否自然可信、可复述(0-10);
+2) 亮点防守:亮点是否有追问预案且脚本可背(0-10);
+3) 缺点话术:是否"诚实但有准备",而非找借口(0-10);
+4) 对比章节:选型对比是否客观、含所选方案缺点与适用边界(0-10)。
+只输出严格 JSON:{"STAR可信度":0,"亮点防守":0,"缺点话术":0,"对比章节":0,"problems":["具体问题,含改进建议"],"strengths":["做得好的点"]}。注意:problems 每条不超过 60 字,先输出四个分数再输出 problems,确保分数字段不被截断`;
+
+export const EVAL_USABILITY_SYSTEM = `你是面试准备教练。给你题库(百问百答)的中段样本与统计。评估"结构与易用性":题目是否具体指向代码而非空泛八股、答案要点是否可直接背诵、难度梯度是否合理(0-10)。只输出严格 JSON:{"易用性":0,"problems":["..."],"strengths":["..."]}`;
 
 /* ================= 提示词导出(供 docs/prompts 渲染) ================= */
 
@@ -434,7 +465,12 @@ export function buildPromptDocs(): PromptDoc[] {
         ],
         fileList: ['src/server.js(1-120 行)', 'src/cache.js(1-60 行)'],
         askedStems: ['(已出题目列表,禁止重复)'],
-      })}`,
+      })}
+
+## 补题模式(topup=true 时追加在 User 末尾)
+
+${STAGE2_TOPUP_USER_HINT}
+请重点补齐这些缺口题位,不要与"已出题目"列表里的任何题语义重复。`,
     },
     {
       file: '02b-题目修复.md',
@@ -445,11 +481,43 @@ export function buildPromptDocs(): PromptDoc[] {
       ])}`,
     },
     {
+      file: '02c-对比块补齐.md',
+      title: '阶段 2.5:对比块补齐修复环',
+      description: '选型对比类题目缺结构化对比块时,依据题目、答案要点与引用处代码原文定向补块(缓存命中也要复验形状)。',
+      body: `## System\n\n${STAGE2_CMP_REPAIR_SYSTEM}\n\n## User 模板\n\n${stage2CmpRepairUser(
+        '<题目>',
+        ['<答案要点 1>', '<答案要点 2>'],
+        '<引用处代码原文>'
+      )}`,
+    },
+    {
+      file: '02d-要点实质化.md',
+      title: '阶段 2.6:答案要点实质化修复环',
+      description: '答案要点退化成引用校订批注时,基于代码原文与该题对比块重写为可直接背诵的实质要点。',
+      body: `## System\n\n${STAGE2_POINTS_REPAIR_SYSTEM}\n\n## User 模板\n\n${stage2PointsRepairUser(
+        '<题目>',
+        ['<有毛病的要点>'],
+        '<引用处代码原文>',
+        '<该题对比块 JSON,可为空>'
+      )}`,
+    },
+    {
       file: '03-对抗校验.md',
       title: '阶段 3:对抗校验(反幻觉环)',
       description: '校验员拿引用处代码原文逐条核对答案要点与对比块,裁决 pass/fix/flag。',
       body: `## System\n\n${STAGE3_VERIFY_SYSTEM}\n\n## User 模板\n\n${stage3VerifyUser(
         '<题目+答案+代码依据处的代码原文,批量 5 题>'
+      )}`,
+    },
+    {
+      file: '03b-标红题重写.md',
+      title: '阶段 3.5:标红题重写',
+      description: '被校验证伪(flag)的题,以校验结论为权威重写主答案;场景不可达的改写为"证明不可达 + 设计缺陷"。',
+      body: `## System\n\n${STAGE2_FLAG_REWRITE_SYSTEM}\n\n## User 模板\n\n${stage2FlagRewriteUser(
+        '<题目>',
+        ['<当前答案要点>'],
+        '<校验结论>',
+        '<引用处代码原文(截 8000 字)>'
       )}`,
     },
     {
@@ -504,6 +572,59 @@ export function buildPromptDocs(): PromptDoc[] {
         },
         '<候选人口述回答>'
       )}`,
+    },
+    {
+      file: '07-自评评委.md',
+      title: '阶段 7:自评环四评委(evaluate 命令)',
+      description:
+        'DeepSeek 当评委对产物打分(满分 10):事实抽查 / 横向对比质量 / 叙述材料 / 题库易用性;结果按材料内容缓存,重跑分数可复现。',
+      body: [
+        '## 评委 1:事实真实性抽查(抽样题,每题附引用处代码原文,题间以 "========" 分隔)',
+        '',
+        '### System',
+        '',
+        EVAL_FACT_SYSTEM,
+        '',
+        '### User 结构',
+        '',
+        '## Q01〔类别|难度〕\n问题:<问题>\n答案要点:<要点, " | " 分隔>\n代码依据:<文件:行号、文件:行号>\n\n引用处代码原文:\n<逐条引用摘录,截 5000 字>',
+        '',
+        '---',
+        '',
+        '## 评委 2:横向对比质量(前 5 道带对比块的题)',
+        '',
+        '### System',
+        '',
+        EVAL_CMP_SYSTEM,
+        '',
+        '### User 结构',
+        '',
+        '题目与对比块:\n<题号>:<问题>\n<对比块 JSON>(题间空一行)',
+        '',
+        '---',
+        '',
+        '## 评委 3:叙述类材料质量(01/03/04/05 四份 Markdown,01 截 12000 字、其余各 8000 字)',
+        '',
+        '### System',
+        '',
+        EVAL_NARRATIVE_SYSTEM,
+        '',
+        '### User 结构',
+        '',
+        '# 01 项目讲解\n<Markdown>\n\n# 03 亮点与防守\n<Markdown>\n\n# 04 缺点与改进\n<Markdown>\n\n# 05 设计决策与选型对比\n<Markdown>',
+        '',
+        '---',
+        '',
+        '## 评委 4:题库结构与易用性(统计 + 02 前 8000 字样本)',
+        '',
+        '### System',
+        '',
+        EVAL_USABILITY_SYSTEM,
+        '',
+        '### User 结构',
+        '',
+        '统计:共 <N> 题;类别分布:<类别>:<数量>,…。\n\n# 百问百答样本\n<02_百问百答.md 前 8000 字>',
+      ].join('\n\n'),
     },
     comparisonTemplateDoc(),
   ];

@@ -58,7 +58,7 @@ node dist/cli/index.js evaluate ./你的仓库/interview-output
 # 扩展面板搜索「代码转面试」(发布者 DawnofHope)→ Install → 重新加载窗口
 
 # 方式二:本地 vsix(未发布/离线环境)
-code --install-extension vscode/code-interview-prep-0.3.0.vsix
+code --install-extension vscode/code-interview-prep-0.4.0.vsix
 # 安装后必须重载窗口(Ctrl+Shift+P → "重新加载窗口"),命令面板/右键菜单才会出现命令
 
 # 方式三:开发调试
@@ -70,15 +70,16 @@ cd vscode && npm install && npm run typecheck && node esbuild.js && npx @vscode/
 ```
 
 - 资源管理器**右键文件夹** → 「代码转面试:生成面试材料」(可选 JD 文件)
-- 生成过程**可随时取消**(通知栏取消按钮);详细进度看输出面板的「代码转面试」通道
+- 侧栏面板看**阶段时间轴**(8 节点逐段用时/门控命中/进行中秒表),任务条目悬停 ✕ 单独取消、🗑 移除;不同仓库可并行,同仓库误点去重;输出面板有逐行日志
 - 命令面板 → 「代码转面试:打开面试报告」(Webview 内嵌自测报告,搜索/筛选/掌握标记全可用)
 - 核心是纯 TS 库(`src/core`+`src/stages`),扩展只是薄壳,也可被 CLI/CI/其他宿主复用
 - 安全:`.env`/私钥等敏感文件**不会**发给模型;被分析仓库不能重定向请求端点
 
 ### 不装任何东西:提示词包模式
 
-`npm run export-prompts` 会把六个阶段的完整提示词导出为 `docs/prompts/*.md`,
+`npm run export-prompts` 会把**全部 17 份提示词**(六阶段 + 修复环 2.5/2.6/3.5 + 排练评分 + 自评四评委)原样导出为 `docs/prompts/*.md`,
 可手动粘贴到任意大模型工具(DeepSeek 网页版等)分阶段使用——没有覆盖矩阵/校验环的工程保障,但保留了方法论。
+存档与运行代码同源(取自同一批常量/模板函数),提示词任何改动都会同步重导出入库。
 
 ## 六阶段流水线
 
@@ -116,7 +117,7 @@ cd vscode && npm install && npm run typecheck && node esbuild.js && npx @vscode/
 | HTTP 401 | `.env` 的 `DEEPSEEK_API_KEY` 无效或未生效(不再空转重试) |
 | 模型 not found | 换 `.env` 为 `deepseek-chat`(客户端一般已自动回退) |
 | 请求反复超时 | 服务端拥堵时会自动降级 deepseek-chat;也可在 `.env` 加 `DEEPSEEK_TIMEOUT_MS=300000` 或直接 `DEEPSEEK_MODEL=deepseek-chat` |
-| 生成很慢没反应 | 看输出面板「代码转面试」通道的实时日志;推理模型单次 2-6 分钟属正常,可随时取消(已完成阶段保留缓存) |
+| 生成很慢没反应 | 侧栏面板看阶段时间轴(每节点实时秒表),或输出面板「代码转面试」通道逐行日志;推理模型单次 2-6 分钟属正常,可随时取消(已完成阶段保留缓存) |
 | 该目录已有生成任务在运行 | 同一输出目录有运行锁,防止两条管线互相覆盖;确认无任务可删 `interview-output/.run-lock` |
 | 大仓库费用 | 先用 `--max-files 20` 试跑;热点+有趣代码排名会保证核心文件必读 |
 | 某题标红 flag | 见 `校验报告.md`,人工复核后再背诵——这是特性不是缺陷 |
@@ -132,5 +133,6 @@ src/report/    htmlReport(单文件报告)
 src/cli/       generate / rehearse / evaluate / export-prompts
 vscode/        扩展薄壳(右键生成 + Webview 报告)
 example-demo/  演示仓库(零依赖 Node API:LRU缓存/令牌桶限流/二级索引)
-docs/prompts/  (export-prompts 生成)全部阶段提示词
+docs/prompts/  (export-prompts 生成)全部 17 份提示词原样存档
+docs/版本历史.md  全量开发史(动机/变更/验证/发布状态,audit 报告为证据链)
 ```

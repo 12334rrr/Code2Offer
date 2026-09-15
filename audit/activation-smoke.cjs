@@ -10,7 +10,7 @@ const path = require('path');
 const assert = require('assert');
 const crypto = require('crypto');
 
-const VSIX = path.resolve(__dirname, '../vscode/code-interview-prep-0.3.0.vsix');
+const VSIX = path.resolve(__dirname, '../vscode/code-interview-prep-0.4.0.vsix');
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'cip-smoke-'));
 const extracted = path.join(work, 'extension.js');
 fs.writeFileSync(extracted, execSync(`unzip -p "${VSIX}" extension/dist/extension.js`));
@@ -70,6 +70,7 @@ const vscode = {
   EventEmitter: class { constructor() { this.event = () => D; } fire() {} dispose() {} },
   Disposable: class { static from() { return D; } dispose() {} },
   TreeItem: class { constructor(label, state) { this.label = label; this.collapsibleState = state; } },
+  MarkdownString: class { constructor(v) { this.value = v; } appendMarkdown() { return this; } },
   TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
   ThemeIcon: class { constructor(id) { this.id = id; } },
   ViewColumn: { One: 1 },
@@ -103,11 +104,19 @@ const context = {
   assert.strictEqual(typeof ext.activate, 'function', 'extension.js 未导出 activate');
   ext.activate(context);
 
-  const CMDS = ['generate', 'openReport', 'openOutput', 'openSettings'];
+  const CMDS = ['generate', 'openReport', 'openOutput', 'openSettings', 'cancelTask', 'dismissTask', 'cancelAll', 'dismissAll'];
   for (const c of CMDS) assert.ok(reg.commands[`codeInterviewPrep.${c}`], `命令未注册: ${c}`);
   assert.strictEqual(reg.outputChannels.length, 1, '输出通道未创建');
   assert.ok(reg.trees['codeInterviewPrep.panel'], '树视图未注册');
-  console.log('✓ [1] activate 成功:4 条命令 + 输出通道 + 树视图全部注册');
+  console.log('✓ [1] activate 成功:8 条命令 + 输出通道 + 树视图全部注册');
+
+  // 0.4.0 取消/移除命令:无任务时空参调用必须安全不抛
+  await reg.commands['codeInterviewPrep.cancelTask']();
+  await reg.commands['codeInterviewPrep.dismissTask']();
+  reg.infos.length = 0;
+  await reg.commands['codeInterviewPrep.cancelAll']();
+  assert.ok(reg.infos.some((m) => /没有进行中的生成任务/.test(m)), 'cancelAll 无任务时应提示');
+  console.log('✓ [1b] cancelTask/dismissTask 空参安全;cancelAll 无任务提示正确');
 
   const children = await reg.trees['codeInterviewPrep.panel'].getChildren();
   assert.strictEqual(children.length, 4, '树视图应有 4 个条目');

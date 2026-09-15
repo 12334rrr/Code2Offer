@@ -9,6 +9,7 @@ import { DiskCache, PROMPT_VERSION } from '../core/cache';
 import { StageRunContext } from './stage1Read';
 import { log, warn } from '../core/logger';
 import { sanitizeMdCell } from './stage5Assemble';
+import { EVAL_FACT_SYSTEM, EVAL_CMP_SYSTEM, EVAL_NARRATIVE_SYSTEM, EVAL_USABILITY_SYSTEM } from '../core/prompts';
 
 /**
  * 自评环:用 DeepSeek 当评委,对生成材料按维度打分(满分 10),
@@ -206,10 +207,7 @@ ${excerptOf(q).slice(0, 5000)}`
   try {
     factJudge = await judge(
       'fact',
-      `你是苛刻的技术评委。给你若干面试题(含答案要点与代码依据)及引用处代码原文。逐题评估:
-1) 引用真实性:引用的 文件:行号 与所述内容是否一致(0-10);
-2) 要点一致性:答案要点是否与代码事实相符、无编造(0-10)。
-只输出严格 JSON:{"items":[{"id":"...","cite":0,"consistency":0,"problem":"具体问题"}],"summary":"总体评价与最需改进点"}`,
+      EVAL_FACT_SYSTEM,
       factPayload,
       3000
     );
@@ -224,11 +222,7 @@ ${excerptOf(q).slice(0, 5000)}`
   try {
     cmpJudge = await judge(
       'cmp',
-      `你是苛刻的技术评委。给你若干带"横向对比块"的面试题(候选方案/维度/对比表/结论)。评估:
-1) 维度充分性:维度是否≥3且切中要害(0-10);
-2) 客观性:是否包含所选方案的缺点,有无偏袒(0-10);
-3) 边界明确:结论是否说清"什么场景应反过来选另一个"(0-10)。
-只输出严格 JSON:{"items":[{"id":"...","dims":0,"objectivity":0,"boundary":0,"problem":"..."}],"summary":"总体评价与最需改进点"}`,
+      EVAL_CMP_SYSTEM,
       `题目与对比块:\n${cmpQs.map((q) => `${q.id}:${q.question}\n${JSON.stringify(q.对比)}`).join('\n\n')}`,
       2500
     );
@@ -242,12 +236,7 @@ ${excerptOf(q).slice(0, 5000)}`
   try {
     narrJudge = await judge(
       'narrative',
-      `你是苛刻的模拟面试官。给你候选人的四份面试材料(项目讲解/亮点防守/缺点改进/设计决策对比)。评估:
-1) STAR可信度:项目讲解是否自然可信、可复述(0-10);
-2) 亮点防守:亮点是否有追问预案且脚本可背(0-10);
-3) 缺点话术:是否"诚实但有准备",而非找借口(0-10);
-4) 对比章节:选型对比是否客观、含所选方案缺点与适用边界(0-10)。
-只输出严格 JSON:{"STAR可信度":0,"亮点防守":0,"缺点话术":0,"对比章节":0,"problems":["具体问题,含改进建议"],"strengths":["做得好的点"]}。注意:problems 每条不超过 60 字,先输出四个分数再输出 problems,确保分数字段不被截断`,
+      EVAL_NARRATIVE_SYSTEM,
       `# 01 项目讲解\n${readMd(outDir, '01_项目讲解.md', NARRATIVE_READ_CHARS)}\n\n# 03 亮点与防守\n${readMd(outDir, '03_亮点与防守.md', 8000)}\n\n# 04 缺点与改进\n${readMd(outDir, '04_缺点与改进.md', 8000)}\n\n# 05 设计决策与选型对比\n${readMd(outDir, '05_设计决策与选型对比.md', 8000)}`,
       4000
     );
@@ -261,7 +250,7 @@ ${excerptOf(q).slice(0, 5000)}`
   try {
     useJudge = await judge(
       'usability',
-      `你是面试准备教练。给你题库(百问百答)的中段样本与统计。评估"结构与易用性":题目是否具体指向代码而非空泛八股、答案要点是否可直接背诵、难度梯度是否合理(0-10)。只输出严格 JSON:{"易用性":0,"problems":["..."],"strengths":["..."]}`,
+      EVAL_USABILITY_SYSTEM,
       `统计:共 ${questions.length} 题;类别分布:${[...new Set(questions.map((q) => q.category))]
         .map((c) => `${c}:${questions.filter((q) => q.category === c).length}`)
         .join(',')}。\n\n# 百问百答样本\n${readMd(outDir, '02_百问百答.md', QA_READ_CHARS)}`,

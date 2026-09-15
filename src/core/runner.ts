@@ -16,6 +16,16 @@ import { runStage4, JdAnalysis } from '../stages/stage4JD';
 import { runStage5 } from '../stages/stage5Assemble';
 import { runEvaluation } from '../stages/evaluate';
 
+/** 阶段事件(0.4.0):供宿主渲染"时间轴 + 节点用时"进度 UI */
+export interface StageEvent {
+  id: 'profile' | 'read' | 'questions' | 'verify' | 'rewrite' | 'jd' | 'assemble' | 'done';
+  label: string;
+  status: 'start' | 'done' | 'cached' | 'skip';
+  /** done/cached/skip 时携带该阶段用时 */
+  elapsedMs?: number;
+  note?: string;
+}
+
 export interface RunOptions {
   repoPath: string;
   jdPath?: string;
@@ -24,6 +34,8 @@ export interface RunOptions {
   maxFiles?: number;
   /** VSCode 扩展等宿主可通过它接收阶段进度 */
   onProgress?: (msg: string) => void;
+  /** 结构化阶段事件:start/done/cached/skip + 用时(扩展侧栏时间轴用) */
+  onStage?: (e: StageEvent) => void;
   /** 用户取消信号:贯穿所有阶段的请求与阶段边界 */
   abort?: AbortSignal;
   /** 宿主类型:影响完成后的下一步提示(vscode 用户没有 dist/cli) */
@@ -143,6 +155,18 @@ export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }>
     opts.onProgress?.(t);
   };
 
+  // 结构化阶段事件(宿主时间轴):start 记锚点,done/cached 携带锚点以来的用时
+  let curStage: { id: StageEvent['id']; at: number } | null = null;
+  const stageBegin = (id: StageEvent['id'], label: string) => {
+    curStage = { id, at: Date.now() };
+    opts.onStage?.({ id, label, status: 'start' });
+  };
+  const stageEnd = (id: StageEvent['id'], label: string, status: 'done' | 'cached' | 'skip', note?: string) => {
+    const elapsedMs = curStage?.id === id ? Date.now() - curStage.at : undefined;
+    if (curStage?.id === id) curStage = null;
+    opts.onStage?.({ id, label, status, elapsedMs, note });
+  };
+
   const cfg =
     opts.config ??
     loadConfig({ trustedDirs: [process.cwd(), toolRootDir()], repoDir: root });
@@ -164,6 +188,7 @@ export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }>
   return withRunLock(outDir, async () => {
     /* ---------- 阶段 0:画像(无 LLM) ---------- */
     banner('阶段 0:仓库画像(确定性,无 LLM)');
+    stageBegin('profile', '仓库画像');
     const cachedFactsPath = path.join(outDir, 'repo_facts.json');
     // 画像输入哈希种子 = maxFiles + 根路径 + 文件清单 + 精读文件内容哈希。
     // 门控检查时用缓存画像构造同一种子;重新画像后用新画像构造同一公式落盘——两侧同构。
@@ -181,8 +206,10 @@ export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }>
       }
     }
     let facts;
+    let profileCached = false;
     if (gateSeed !== null && stageDone('profile', shortHash(gateSeed))) {
       facts = JSON.parse(fs.readFileSync(cachedFactsPath, 'utf-8'));
+      profileCached = true;
       log(`  [门控命中] 画像未变化,直接复用(${facts.overview.totalFiles} 文件 / ${facts.overview.totalLOC} 行)`);
     } else {
       facts = profileRepo(root, maxFiles);
@@ -202,16 +229,24 @@ export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }>
     if (truncated.length) warn(`  [注意] 以下文件只读取了前几块:${truncated.join('、')}`);
     if (skippedChunks.length) warn(`  [注意] 以下文件读取失败被跳过:${skippedChunks.join('、')}`);
     log(`  分块完成:${chunks.length} 块`);
+    stageEnd(
+      'profile', '仓库画像',
+      profileCached ? 'cached' : 'done',
+      profileCached ? '门控命中,复用上次画像' : `${facts.overview.totalFiles} 文件 / ${facts.readingPlan.length} 个精读文件 / ${chunks.length} 块`
+    );
 
     /* ---------- 阶段 1:精读 ---------- */
     banner('阶段 1:模块精读(DeepSeek)');
+    stageBegin('read', '模块精读');
     const overviewJsonHash = sha1(JSON.stringify(facts.overview));
     const chunksHash = sha1(chunks.map((c) => `${c.file}:${c.startLine}-${c.endLine}:${c.content}`).join('||'));
     const s1Hash = shortHash(`v2|${overviewJsonHash}|${chunksHash}|${cfg.model}`);
     let cards, knowledge;
+    let readCached = false;
     if (stageDone('read', s1Hash)) {
       cards = JSON.parse(fs.readFileSync(path.join(outDir, 'module_cards.json'), 'utf-8'));
       knowledge = JSON.parse(fs.readFileSync(path.join(outDir, 'knowledge.json'), 'utf-8'));
+      readCached = true;
       log('  [门控命中] 模块卡未变化,直接复用');
     } else {
       ({ cards, knowledge } = await runStage1(client, cache, facts, chunks, ctx));
@@ -220,14 +255,18 @@ export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }>
       saveState('read', s1Hash);
     }
     log(`  模块卡 ${cards.length} 张 | 定位:${knowledge.一句话定位}`);
+    stageEnd('read', '模块精读', readCached ? 'cached' : 'done', readCached ? '门控命中,复用模块卡' : `${cards.length} 张模块卡`);
 
     /* ---------- 阶段 2:出题 ---------- */
     banner('阶段 2:覆盖矩阵出题(100 题)');
+    stageBegin('questions', '出题(含修复环)');
     const qPath = path.join(outDir, 'questions.json');
     const s2Hash = shortHash(`v2|${s1Hash}|${sha1(JSON.stringify(cards))}|${sha1(JSON.stringify(knowledge))}|${cfg.model}`);
     let questions: Question[];
+    let questionsReused = false;
     if (stageDone('questions', s2Hash) && fs.existsSync(qPath)) {
       questions = JSON.parse(fs.readFileSync(qPath, 'utf-8'));
+      questionsReused = true;
       log(`  [门控命中] 题库已存在(${questions.length} 题),直接复用`);
     } else {
       questions = await runStage2(client, cache, facts, cards, knowledge, chunks, outDir, ctx);
@@ -269,9 +308,11 @@ export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }>
       log(`  引用消毒:修正 ${sanitized} 处坏引用`);
       fs.writeFileSync(qPath, JSON.stringify(questions, null, 2), 'utf-8');
     }
+    stageEnd('questions', '出题(含修复环)', 'done', questionsReused ? `题目复用+修复环增量,共 ${questions.length} 题` : `共 ${questions.length} 题`);
 
     /* ---------- 阶段 3:对抗校验 ---------- */
     banner('阶段 3:对抗校验(反幻觉)');
+    stageBegin('verify', '对抗校验');
     // 哈希基于题目全文+分块+提示词+模型(题号恒为 Q01..Q100,旧的"只看 ID"会被全新题库整体绕过)
     const questionsHash = (qs: Question[]) =>
       sha1(qs.map((q) => JSON.stringify([q.id, q.question, q.答案要点, q.代码依据, q.对比 ?? null])).join('||'));
@@ -279,8 +320,10 @@ export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }>
       shortHash(`v3|${questionsHash(questions)}|${chunksHash}|${cfg.model}`);
     if (stageDone('verify', s3HashOf())) {
       log('  [门控命中] 校验结果已存在,直接复用');
+      stageEnd('verify', '对抗校验', 'cached', '门控命中,复用校验结果');
     } else {
       const stats = await runStage3(client, facts, questions, outDir, ctx);
+      stageEnd('verify', '对抗校验', 'done', `pass ${stats.pass} · fix ${stats.fix} · flag ${stats.flag} · 未覆盖 ${stats.unverified}`);
       if (stats.unverified > 0) {
         // 有未覆盖题:不记阶段完成,下次重跑自动补验
         warn(`  [注意] ${stats.unverified} 题未完成对抗校验(unverified),本阶段未记完成,下次运行将自动补验`);
@@ -290,6 +333,7 @@ export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }>
     }
 
     /* ---------- 阶段 3.5:标红题答案重写(反幻觉闭环) ---------- */
+    stageBegin('rewrite', '标红题重写');
     await rewriteFlaggedAnswers(client, cache, facts, questions, outDir, ctx);
     // 重写改变了题目内容 → 校验报告按最终题库重算(此前三处状态不一致)
     writeVerifyReport(
@@ -304,26 +348,34 @@ export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }>
         deterministicIssues: 0,
       }
     );
+    stageEnd('rewrite', '标红题重写', 'done', `${questions.filter((q) => q.verified === 'flag').length} 题仍标红(需人工复核)`);
 
     /* ---------- 阶段 4:JD 加权(可选) ---------- */
     let jd: JdAnalysis | undefined;
     if (opts.jdPath) {
       banner('阶段 4:岗位描述加权');
+      stageBegin('jd', 'JD 加权');
       const jdFile = path.resolve(opts.jdPath);
       if (!fs.existsSync(jdFile)) throw new Error(`JD 文件不存在:${jdFile}`);
       const jdText = fs.readFileSync(jdFile, 'utf-8');
       jd = await runStage4(client, cache, jdText, questions, outDir, ctx);
       // 必考标记落盘,保持 questions.json 与渲染产物一致
       fs.writeFileSync(qPath, JSON.stringify(questions, null, 2), 'utf-8');
+      stageEnd('jd', 'JD 加权', 'done', '必考 Top20 已标记');
+    } else {
+      stageEnd('jd', 'JD 加权', 'skip', '未选择 JD 文件');
     }
 
     /* ---------- 阶段 5:总装 ---------- */
     banner('阶段 5:总装输出(MD 套件 + HTML 报告)');
+    stageBegin('assemble', '总装输出');
     await runStage5(client, cache, facts, cards, knowledge, questions, outDir, jd, ctx);
+    stageEnd('assemble', '总装输出', 'done', '01~06 Markdown + index.html');
 
     client.printUsage();
     if (stageStart.name) log(`  (${stageStart.name} 用时 ${fmtElapsed(Date.now() - stageStart.at)})`);
     banner('完成');
+    opts.onStage?.({ id: 'done', label: '完成', status: 'done', elapsedMs: Date.now() - startedAt, note: `产物目录 ${outDir}` });
     log(`产物目录:${outDir}`);
     log(`总耗时 ${fmtElapsed(Date.now() - startedAt)}`);
     if (opts.host === 'vscode') {

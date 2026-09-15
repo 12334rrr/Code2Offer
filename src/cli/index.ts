@@ -11,27 +11,27 @@ import { topUpToQuota } from '../stages/stage2Questions';
 import { RepoFacts } from '../core/profiler';
 import { ModuleCard, ProjectKnowledge } from '../core/schemas';
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 
 const USAGE = `代码转面试 ${VERSION} — 读取完整代码仓库,生成真实面试场景全套材料(DeepSeek)
 
 用法:
-  code-interview generate <仓库路径> [--jd <岗位描述.txt>] [--out <输出目录>] [--force] [--max-files <n>]
+  code2offer generate <仓库路径> [--jd <岗位描述.txt>] [--out <输出目录>] [--force] [--max-files <n>]
       生成全套材料:项目讲解 / 百问百答(含横向对比) / 亮点防守 / 缺点改进 / 设计决策对比 / index.html 报告
 
-  code-interview rehearse <输出目录> [--count <n>] [--category <类别>] [--top20]
+  code2offer rehearse <输出目录> [--count <n>] [--category <类别>] [--top20]
       模拟面试排练:逐题提问 → 你作答 → DeepSeek 评分+追问 → 记录弱项
 
-  code-interview evaluate <输出目录>
+  code2offer evaluate <输出目录>
       自评环:DeepSeek 当评委,对产物按维度打分(满分10),给出优势/劣势/改进清单
 
-  code-interview topup <输出目录>
+  code2offer topup <输出目录>
       按覆盖矩阵配额定向补齐缺题(历史批次坍塌后的恢复,不必整库重出)
 
-  code-interview export-prompts [输出目录=docs/prompts]
+  code2offer export-prompts [输出目录=docs/prompts]
       导出全部阶段提示词为 Markdown(可单独粘贴到任意大模型工具使用)
 
-  code-interview --version | --help
+  code2offer --version | --help
 
 示例:
   node dist/cli/index.js generate ./my-repo --jd jd.txt

@@ -6,7 +6,7 @@ import { Chunk } from '../core/chunker';
 import { DiskCache, PROMPT_VERSION } from '../core/cache';
 import { ModuleCard, ProjectKnowledge, Question, coerceQuestion, validateQuestion } from '../core/schemas';
 import { Slot, buildSlots, totalQuota, computeDeficitSlots } from '../core/coverage';
-import { STAGE2_SYSTEM, STAGE2_REPAIR_SYSTEM, STAGE2_CMP_REPAIR_SYSTEM, STAGE2_POINTS_REPAIR_SYSTEM, STAGE2_FLAG_REWRITE_SYSTEM, Stage2BatchInput, stage2BatchUser, stage2RepairUser, stage2CmpRepairUser, stage2PointsRepairUser, STAGE2_TOPUP_USER_HINT } from '../core/prompts';
+import { STAGE2_SYSTEM, STAGE2_REPAIR_SYSTEM, STAGE2_CMP_REPAIR_SYSTEM, STAGE2_POINTS_REPAIR_SYSTEM, STAGE2_FLAG_REWRITE_SYSTEM, Stage2BatchInput, stage2BatchUser, stage2RepairUser, stage2CmpRepairUser, stage2PointsRepairUser, stage2FlagRewriteUser, STAGE2_TOPUP_USER_HINT } from '../core/prompts';
 import { requiresComparison } from '../core/coverage';
 import { isValidComparison } from '../core/schemas';
 import { deterministicCheck } from './stage3Verify';
@@ -514,12 +514,8 @@ export async function rewriteFlaggedAnswers(
       .map((c) => excerpts.get(`${q.id}|${c.file}|${c.lines}`) ?? '')
       .filter(Boolean)
       .join('\n\n');
-    const material = [
-      `# 题目\n${q.question}`,
-      `# 当前答案要点(已被校验判定与代码矛盾)\n${q.答案要点.map((a, i) => `${i + 1}. ${a}`).join('\n')}`,
-      `# 校验结论(权威,必须以此改正主答案)\n${q.verifyNote}`,
-      `# 引用处代码原文\n${ex.slice(0, 8000)}`,
-    ].join('\n\n');
+    // 模板与 docs/prompts/03b 存档同源(prompts.ts),缓存键基于最终字符串,逐字节不变
+    const material = stage2FlagRewriteUser(q.question, q.答案要点, q.verifyNote ?? '', ex.slice(0, 8000));
     const key = cache.key('flag-rewrite', PROMPT_VERSION, STAGE2_FLAG_REWRITE_SYSTEM, q.id, material);
     const origNote = q.verifyNote ?? '';
     const tryApply = (text: string): boolean => {

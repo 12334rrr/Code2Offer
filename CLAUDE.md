@@ -6,6 +6,12 @@
 
 读取任意代码仓库,用 DeepSeek 生成面试准备全套材料:百问百答 100 题(每题带 `文件:行号` 代码依据)、项目讲解(STAR 三版本)、亮点防守、缺点改进、选型横向对比、单文件可搜索 HTML 报告。两种使用方式:**CLI**(`src/cli`)与 **VSCode 扩展薄壳**(`vscode/`,核心逻辑全在纯 TS 库里,扩展只是壳)。
 
+## 用户长期要求(必须遵守,2026-09-15 起)
+
+1. **提示词全量原样存档**:所有实际使用的 LLM 提示词(六阶段 + 三个修复环 2.5/2.6/3.5 + 排练评分 + 自评四评委)必须登记在 `buildPromptDocs()`(src/core/prompts.ts),经 `npm run export-prompts` **原样**导出到 `docs/prompts/` 并入库。**新增或修改任何提示词字符串,必须同步更新登记与存档,并在同一次提交里入库**——代码中的提示词与 docs/prompts 不一致视为缺陷。新增 LLM 调用点时优先把提示词写成 prompts.ts 的导出常量(evaluate 四评委即为此从内联字符串提升),保证可导出、可逐字节比对。
+2. **改完即推送**:每轮代码/文档修改完成并通过验证(`npm test`;动了扩展或 src 被扩展打包的内容时,还要 vscode typecheck + esbuild + 重打包 + `node audit/activation-smoke.cjs`)后,直接 `git add -A && git commit && git push origin main`,**不再攒着等用户再次要求**。提交前必须跑密钥扫描(见"发布纪律"):取 `.env` 真实密钥全文与前 12 位前缀,在暂存清单逐文件字节级搜索,0 命中才提交。
+3. **版本历史成文**:每次发版在**两处**记录——`vscode/CHANGELOG.md`(面向商店用户的发布说明)与 `docs/版本历史.md`(全量开发史:动机 → 变更 → 验证数据 → 产物与发布状态,含未发布的内部构建)。`audit/*.md` 审计报告按版本归档保留,作为决策证据。
+
 ## 常用命令
 
 ```bash
@@ -13,10 +19,10 @@ npm run build                                # npx tsc -p .(先于一切运行)
 node dist/cli/index.js generate <仓库> [--jd jd.txt]   # 全管线
 node dist/cli/index.js evaluate <输出目录>    # DeepSeek 评委自评
 node dist/cli/index.js rehearse <输出目录> --count 5   # 交互排练
-node dist/cli/index.js export-prompts        # 导出六阶段提示词 → docs/prompts/
+node dist/cli/index.js export-prompts        # 导出全部提示词存档 → docs/prompts/(17 份,含修复环/排练/评委)
 npm test                                     # 构建 + 46 个单元/行为测试(node --test)
 
-# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.3.0)
+# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.4.0)
 cd vscode && npm run typecheck && node esbuild.js && npx @vscode/vsce package --no-dependencies
 code --install-extension vscode/code-interview-prep-<版本>.vsix
 
@@ -42,6 +48,7 @@ node audit/activation-smoke.cjs   # 9 项断言;含"包内文件 == 本地构建
 - **门控哈希基于内容**(0.3.0 起):画像 = 文件清单+精读文件内容哈希;精读 = overview+chunks 全文哈希;校验 = 题目全文+分块+提示词+模型。等长改码、重出题、改答案都会正确失效。
 - **运行锁**:同一输出目录同时只允许一条管线(进程内 Map + `.run-lock` 锁文件,PID+时间戳,45 分钟过期)。
 - **取消**:`RunOptions.abort` 贯穿全部阶段与每个模型请求;扩展把 VSCode CancellationToken 接到它上面。
+- **阶段事件(0.4.0)**:`RunOptions.onStage` 发结构化事件(profile/read/questions/verify/rewrite/jd/assemble/done × start/done/cached/skip + 用时)。扩展面板据此渲染时间轴:`tasks` Map 支持**多仓库并行任务**,同仓库按 outDir 去重(误点弹「查看进度/取消并重新开始」),条目内联 ✕ 取消/🗑 移除,1s ticker 刷进行中秒表。CLI 不用 onStage,行为不变。
 - **统一日志**:`src/core/logger.ts`——所有阶段用 `log()/warn()`,扩展注入 LogOutputChannel;不要在 stages 里直接 console.log。
 - **缓存键包含 system 提示词全文**(`stage5Assemble.ts` / `stage2Questions.ts`):改提示词任何一字,对应产物缓存立即失效、定向重生成;`PROMPT_VERSION` 现为 '2'(0.3.0 行为变更已整体失效旧缓存)。
 - 横向对比是一级硬要求:`isValidComparison` 严格版(矩形表/非空单元格),不合格块剥除后由 2.5 环补齐。
