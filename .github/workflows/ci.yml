@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # ---- 核心库:构建 + 全量单测(78+ 契约/行为用例,不需要 API 密钥) ----
+      - run: npm ci
+      - run: npm test
+
+      # ---- 缺陷回归门禁:0.3.0 审计的 15 个缺陷探针必须全部"不可复现" ----
+      - run: node audit/regression-gate.cjs
+
+      # ---- 离线合约测试(mock API,不需要密钥) ----
+      - run: node audit/mock-api-contract.cjs
+
+      # ---- 扩展:类型检查 + 打包 + 发布产物验证 ----
+      - run: npm ci
+        working-directory: vscode
+      - run: npm run typecheck
+        working-directory: vscode
+      - run: node esbuild.js
+        working-directory: vscode
+      - run: npx @vscode/vsce package --no-dependencies
+        working-directory: vscode
+
+      # ---- vsix 内容白名单/密钥检查 + 无头激活冒烟(解包真实 bundle 走全路径) ----
+      - run: node audit/vsix-content-check.cjs
+      - run: node audit/activation-smoke.cjs

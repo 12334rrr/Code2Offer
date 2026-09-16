@@ -19,10 +19,11 @@ npm run build                                # npx tsc -p .(先于一切运行)
 node dist/cli/index.js generate <仓库> [--jd jd.txt] [--out <固定目录>]   # 全管线;默认每次自动独立目录 runs/run-NNNN(增量接续),--out 走旧固定目录语义
 node dist/cli/index.js evaluate <run目录>     # DeepSeek 评委自评
 node dist/cli/index.js rehearse <run目录> --count 5    # 交互排练
-node dist/cli/index.js export-prompts        # 导出全部提示词存档 → docs/prompts/(17 份,含修复环/排练/评委)
-npm test                                     # 构建 + 78 个单元/行为测试(node --test)
+node dist/cli/index.js export-prompts        # 导出全部提示词存档 → docs/prompts/(18 份,含修复环/排练/评委)
+npm test                                     # 构建 + 93 个单元/行为测试(node --test)
+node audit/regression-gate.cjs               # 缺陷回归门禁:0.3.0 审计 15 缺陷探针必须全部"不可复现"(CI 同款)
 
-# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.8.0;商店要求纯数字点分版本,禁止 -rc/-beta 等预发布号)
+# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.8.1;商店要求纯数字点分版本,禁止 -rc/-beta 等预发布号)
 cd vscode && npm run typecheck && node esbuild.js && npx @vscode/vsce package --no-dependencies
 code --install-extension vscode/code-interview-prep-<版本>.vsix
 
@@ -60,6 +61,7 @@ node audit/activation-smoke.cjs   # 9 项断言;含"包内文件 == 本地构建
 
 - **评委噪声**:evaluate 评委结果已按内容缓存——同一份材料重跑分数一致;只有改材料/删 `.cache` 才会变。迭代决策以确定性维度为准。
 - 仓库已推送 GitHub(origin=SSH `git@github.com:12334rrr/Code2Offer.git`),`repository` 字段已配,vsce 不再需要 `--allow-missing-repository`;publisher=`DawnofHope`,已上架 VSCode 商店。0.3.0 起 prepublish 含类型检查;`.vscodeignore` 排除源码/sourcemap。
+- **CI 常驻**(.github/workflows/ci.yml):push/PR 即跑 `npm test` + 缺陷回归门禁 + mock 合约 + 扩展打包 + 冒烟——不需要密钥;真实模型 e2e 仍需本地手动跑。商店图标 `vscode/media/icon128.png` 由 `node scripts/make-icon.cjs` 确定性再生成;LICENSE=MIT(两包 license 字段已配)。`npm audit --omit=dev` 双包 0 漏洞(0.8.1 时点)。
 - 修改 `src/` 后:扩展需 `node esbuild.js` 重打包并在宿主里 Ctrl+R;CLI 需 `npm run build`;测试 `npm test`。
 - 修复环(cmp-repair / points-repair / flag-rewrite / stage4-JD)都有「缓存命中也要复验形状 + 重试」结构,新增 LLM 消费方照此写(否则坏形状缓存会造成重跑必崩)。
 - Windows 终端中文乱码:`chcp 65001`。历史示例产物在 `example-demo/interview-output/`(100 题,自评 8.3–8.9,确定性合规 10.0;系 0.2.x 行为生成)。
