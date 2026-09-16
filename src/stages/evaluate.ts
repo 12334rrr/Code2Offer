@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { DeepSeekClient, parseJsonLoose } from '../core/deepseek';
 import { RepoFacts } from '../core/profiler';
-import { Question, parseCiteRanges, isValidComparison } from '../core/schemas';
+import { Question, parseCiteRanges, isValidComparison, MAX_CITE_SPAN } from '../core/schemas';
 import { CATEGORIES, totalQuota } from '../core/coverage';
 import { deterministicCheck } from './stage3Verify';
 import { DiskCache, PROMPT_VERSION } from '../core/cache';
@@ -246,14 +246,24 @@ ${excerptOf(q).slice(0, 5000)}`
 
   /* ---------- 评委 4:题库易用性 ---------- */
   log('  评委 4/4:题库结构与易用性 ...');
+  // 确定性机检事实(全量,代码计算):评委只负责样本文本的背诵体验,不再猜测全量
+  const followupOk = questions.filter((q) => (q.追问链 || []).length >= 2 && q.追问链.every((f) => f.参考要点 && f.参考要点.length >= 10)).length;
+  const scoreOk = questions.filter((q) => typeof q.难度分 === 'number' && q.难度分 >= 1 && q.难度分 <= 10).length;
+  const spans = questions.flatMap((q) => (q.代码依据 || []).flatMap((c) => parseCiteRanges(c.lines) ?? []));
+  const maxSpan = spans.length ? Math.max(...spans.map(([s, e]) => e - s + 1)) : 0;
+  const wideCount = spans.filter(([s, e]) => e - s + 1 > MAX_CITE_SPAN).length;
   let useJudge: Record<string, unknown> = {};
   try {
     useJudge = await judge(
       'usability',
       EVAL_USABILITY_SYSTEM,
-      `统计:共 ${questions.length} 题;类别分布:${[...new Set(questions.map((q) => q.category))]
-        .map((c) => `${c}:${questions.filter((q) => q.category === c).length}`)
-        .join(',')}。\n\n# 百问百答样本\n${readMd(outDir, '02_百问百答.md', QA_READ_CHARS)}`,
+      `确定性机检事实(全量 ${questions.length} 题,由代码计算,视为给定事实):` +
+        `追问带参考要点 ${followupOk}/${questions.length};难度分(1-10)落盘 ${scoreOk}/${questions.length};` +
+        `单条代码依据最大跨度 ${maxSpan} 行(规则上限 ${MAX_CITE_SPAN},超限引用会被确定性截断);超限引用 ${wideCount} 条;` +
+        `类别分布:${[...new Set(questions.map((q) => q.category))]
+          .map((c) => `${c}:${questions.filter((q) => q.category === c).length}`)
+          .join(',')}。` +
+        `\n\n# 百问百答样本(仅用于体验评估,不要以"样本截断无法判断全量"为由扣分——全量事实已在上面给出)\n${readMd(outDir, '02_百问百答.md', QA_READ_CHARS)}`,
       1500
     );
   } catch (err) {

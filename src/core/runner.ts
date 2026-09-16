@@ -12,7 +12,7 @@ import { STAGE5_NARRATIVE_SYSTEM, STAGE5_HIGHLIGHTS_SYSTEM, STAGE5_WEAKNESS_SYST
 import { log, warn, withLogSink, LogSink } from './logger';
 import { runStage1, StageRunContext } from '../stages/stage1Read';
 import { runStage2, repairComparisons, repairAnnotationAnswers, rewriteFlaggedAnswers, resetVerifyCheckpoint } from '../stages/stage2Questions';
-import { runStage3, sanitizeCitations, writeVerifyReport } from '../stages/stage3Verify';
+import { runStage3, sanitizeCitations, ensureCitationCoverage, repairRiskWithoutFix, writeVerifyReport } from '../stages/stage3Verify';
 import { runStage4, JdAnalysis } from '../stages/stage4JD';
 import { runStage5 } from '../stages/stage5Assemble';
 import { runEvaluation } from '../stages/evaluate';
@@ -366,10 +366,12 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     await repairComparisons(client, cache, facts, questions, outDir, ctx);
     /* ---------- 阶段 2.6:答案要点实质化(校订批注式要点重写) ---------- */
     await repairAnnotationAnswers(client, cache, facts, questions, outDir, ctx);
-    /* ---------- 阶段 2.7:引用消毒(越界截断/坏引用删除,确定性) ---------- */
+    /* ---------- 阶段 2.7:引用覆盖补齐 + 消毒(越界截断/坏引用删除,确定性) ---------- */
+    // 覆盖补齐在前:要点里主张的 file:lines 先进依据列表,再统一消毒,保证"背诵内容 ↔ 依据"自洽
+    const covered = ensureCitationCoverage(facts, questions);
     const sanitized = sanitizeCitations(facts, questions);
-    if (sanitized) {
-      log(`  引用消毒:修正 ${sanitized} 处坏引用`);
+    if (covered || sanitized) {
+      log(`  引用消毒:补齐 ${covered} 条覆盖、修正 ${sanitized} 处坏引用`);
       fs.writeFileSync(qPath, JSON.stringify(questions, null, 2), 'utf-8');
     }
     stageEnd('questions', '出题(含修复环)', 'done', questionsReused ? `题目复用+修复环增量,共 ${questions.length} 题` : `共 ${questions.length} 题`);
@@ -383,18 +385,14 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
       sha1(qs.map((q) => JSON.stringify([q.id, q.question, q.答案要点, q.代码依据, q.对比 ?? null])).join('||'));
     const s3HashOf = () =>
       shortHash(`v4|${QUESTION_VALIDATION_VERSION}|${sha1(STAGE3_VERIFY_SYSTEM)}|${questionsHash(questions)}|${chunksHash}|${cfg.model}`);
+    let unverifiedCount = 0;
     if (stageDone('verify', s3HashOf())) {
       log('  [门控命中] 校验结果已存在,直接复用');
       stageEnd('verify', '对抗校验', 'cached', '门控命中,复用校验结果');
     } else {
       const stats = await runStage3(client, facts, questions, outDir, ctx);
       stageEnd('verify', '对抗校验', 'done', `pass ${stats.pass} · fix ${stats.fix} · flag ${stats.flag} · 未覆盖 ${stats.unverified}`);
-      if (stats.unverified > 0) {
-        // 有未覆盖题:不记阶段完成,下次重跑自动补验
-        warn(`  [注意] ${stats.unverified} 题未完成对抗校验(unverified),本阶段未记完成,下次运行将自动补验`);
-      } else {
-        saveState('verify', s3HashOf());
-      }
+      unverifiedCount = stats.unverified;
     }
     // Stage 3 can replace answer points while applying a factual correction.
     // Re-run the same self-contained-answer repair gate after that writeback;
@@ -406,6 +404,22 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     /* ---------- 阶段 3.5:标红题答案重写(反幻觉闭环) ---------- */
     stageBegin('rewrite', '标红题重写');
     await rewriteFlaggedAnswers(client, cache, facts, questions, outDir, ctx);
+
+    /* ---------- 阶段 3.6:风险给药兜底 + 引用终检(顺序:给药 → 补齐 → 消毒) ---------- */
+    // 此前的引用消毒跑在校验之前,而校验改写会引入新的代码依据 —— 终检必须在其后再跑一次;
+    // verify 门控哈希改记"终态"(含给药与引用自洽),否则终态漂移会让下次运行无谓重验
+    const riskFixed = await repairRiskWithoutFix(client, cache, facts, questions, outDir, ctx);
+    const coveredFinal = ensureCitationCoverage(facts, questions);
+    const sanitizedFinal = sanitizeCitations(facts, questions);
+    if (riskFixed || coveredFinal || sanitizedFinal) {
+      log(`  [终检] 风险给药修补 ${riskFixed} 题 · 引用覆盖补齐 ${coveredFinal} 条 · 消毒修正 ${sanitizedFinal} 处`);
+      fs.writeFileSync(qPath, JSON.stringify(questions, null, 2), 'utf-8');
+    }
+    if (unverifiedCount === 0) {
+      saveState('verify', s3HashOf());
+    } else {
+      warn(`  [注意] ${unverifiedCount} 题未完成对抗校验(unverified),本阶段未记完成,下次运行将自动补验`);
+    }
     // 重写改变了题目内容 → 校验报告按最终题库重算(此前三处状态不一致)
     writeVerifyReport(
       questions,

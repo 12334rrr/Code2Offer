@@ -13,6 +13,7 @@ export type RequestType =
   | 'stage2-points'
   | 'stage3-verify'
   | 'stage3-rewrite'
+  | 'stage3-riskfix'
   | 'stage4-jd'
   | 'stage5-narrative'
   | 'stage6-rehearse'
@@ -41,6 +42,7 @@ const POLICY_DEFAULTS: Record<RequestType, Omit<RequestPolicy, 'requestType' | '
   'stage2-points': { temperature: 0.15, jsonMode: true, baseMaxTokens: 2200, hardMaxTokens: 4500, timeout: 300000, retries: 1, concurrencyGroup: 'repair', cachePolicy: 'read-write', reasoningPolicy: 'prefer-fast' },
   'stage3-verify': { temperature: 0.05, jsonMode: true, baseMaxTokens: 6500, hardMaxTokens: 10000, timeout: 300000, retries: 2, concurrencyGroup: 'verify', cachePolicy: 'read-write', reasoningPolicy: 'prefer-fast' },
   'stage3-rewrite': { temperature: 0.1, jsonMode: true, baseMaxTokens: 2200, hardMaxTokens: 4500, timeout: 300000, retries: 1, concurrencyGroup: 'repair', cachePolicy: 'read-write', reasoningPolicy: 'prefer-fast' },
+  'stage3-riskfix': { temperature: 0.1, jsonMode: true, baseMaxTokens: 2200, hardMaxTokens: 4500, timeout: 300000, retries: 1, concurrencyGroup: 'repair', cachePolicy: 'read-write', reasoningPolicy: 'prefer-fast' },
   'stage4-jd': { temperature: 0.15, jsonMode: true, baseMaxTokens: 3500, hardMaxTokens: 7000, timeout: 300000, retries: 2, concurrencyGroup: 'jd', cachePolicy: 'read-write', reasoningPolicy: 'prefer-fast' },
   'stage5-narrative': { temperature: 0.45, jsonMode: false, baseMaxTokens: 6000, hardMaxTokens: 10000, timeout: 300000, retries: 2, concurrencyGroup: 'narrative', cachePolicy: 'read-write', reasoningPolicy: 'allow' },
   'stage6-rehearse': { temperature: 0.2, jsonMode: true, baseMaxTokens: 1800, hardMaxTokens: 3500, timeout: 300000, retries: 2, concurrencyGroup: 'rehearse', cachePolicy: 'disabled', reasoningPolicy: 'prefer-fast' },

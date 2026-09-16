@@ -11,9 +11,10 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
-const candidates = [process.env.CODE_EXE, 'G:\\VSCode\\Microsoft VS Code\\Code.exe', 'C:\\Program Files\\Microsoft VS Code\\Code.exe'].filter(Boolean);
-const codeExe = candidates.find((p) => fs.existsSync(p));
-if (!codeExe) { console.error('UNVERIFIED:未找到 Code.exe,请设置 CODE_EXE'); process.exit(2); }
+// 顶层 Code.exe 在本机是转发壳(--version 吐 Node 版本),必须走 bin\code.cmd(真 VS Code CLI)
+const candidates = [process.env.CODE_CMD, 'G:\\VSCode\\Microsoft VS Code\\bin\\code.cmd', 'C:\\Program Files\\Microsoft VS Code\\bin\\Code.cmd'].filter(Boolean);
+const codeCmd = candidates.find((p) => fs.existsSync(p));
+if (!codeCmd) { console.error('UNVERIFIED:未找到 VS Code CLI(code.cmd),请设置 CODE_CMD'); process.exit(2); }
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'code2offer-extension-host-'));
 const userData = path.join(work, 'user-data');
@@ -25,8 +26,8 @@ const args = [
   `--user-data-dir=${userData}`, `--extensions-dir=${extensions}`,
   path.join(root, 'example-demo'),
 ];
-const child = spawn(codeExe, args, { stdio: 'ignore', windowsHide: false });
-const deadline = Date.now() + 25_000;
+const child = spawn('cmd.exe', ['/c', codeCmd, ...args], { stdio: 'ignore', windowsHide: false, windowsVerbatimArguments: false });
+const deadline = Date.now() + 60_000; // 首次启动可能较慢
 
 function allFiles(dir) {
   if (!fs.existsSync(dir)) return [];

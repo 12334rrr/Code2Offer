@@ -5,11 +5,11 @@
 
 export const DIFFICULTIES = ['基础', '进阶', '刁钻'] as const;
 /** Bump when deterministic user-facing question validation semantics change. */
-export const QUESTION_VALIDATION_VERSION = '3';
+export const QUESTION_VALIDATION_VERSION = '4';
 export type Difficulty = (typeof DIFFICULTIES)[number];
 
-/** 单条代码依据允许的最大行跨度(0.8.0 起,S 级要求"题题精确定位",禁止文件级/整文件引用) */
-export const MAX_CITE_SPAN = 80;
+/** 单条代码依据允许的最大行跨度(0.8.1 起 S 级收紧到 40:约一屏,面试官能当场翻到) */
+export const MAX_CITE_SPAN = 40;
 
 export interface CodeCite {
   file: string;
@@ -233,7 +233,9 @@ export function validateQuestion(q: unknown, files: Set<string>): string[] {
 
 /** Reject strings that make a generated answer impossible to rehearse or verify. */
 export function hasPresentationIssue(text: string): boolean {
-  return /(?:所给|该|引用处)?原文.{0,8}(?:未完整展示|未展示|未提供)|(?:需|请).{0,5}(?:补充|核对)|无法确认|待(?:补充|确认)|\bX\s*(?:和|与)\s*Y\b|\d+\s*附近|\d+\s*[-~至]\s*\d+\s*行段内/.test(text);
+  return /(?:所给|该|引用处)?原文.{0,8}(?:未完整展示|未展示|未提供)|(?:需|请).{0,5}(?:补充|核对)|无法确认|待(?:补充|确认)|\bX\s*(?:和|与)\s*Y\b|\d+\s*附近|\d+\s*[-~至]\s*\d+\s*行段内/.test(text)
+    // 0.8.1:证据元话语型"答案"(讨论证据够不够,而不是回答问题)同样不可背诵
+    || /未被?(?:任何)?(?:引用|摘录|原文|材料|现有代码)[^。]{0,8}(?:覆盖|展示|证实)|未经验证的推断|无法从[^。]{0,10}(?:代码|引用|摘录|原文)[^。]{0,6}(?:证实|推出|确认)/.test(text);
 }
 
 /**
@@ -296,6 +298,17 @@ export function coerceQuestion(raw: unknown, id: string, category: string, diffi
         }
       : undefined,
   };
+}
+
+/* ---------------- 风险给药语义(0.8.1):指出风险必须当场给改进方案 ---------------- */
+/** 单一事实源:审计脚本(audit/s-level-audit.cjs)与修复环(repairRiskWithoutFix)共用 */
+
+export const RISK_RE = /(风险|缺陷|隐患|坏味道|不足|局限|退化|失效|溢出|竞态|死锁|泄漏|开销|瓶颈|裂点|盲区|代价)/;
+export const FIX_RE = /(改进|修复|应(?:改|调|做|把|在|显式|补|调用)|改为|换成|建议|方案|升级|拆分|校验|加锁|限流|兜底|重试|降级|注入|白名单|转义|验证方式|压测|回归基线)/;
+
+/** 该题是否"指出风险但没有任何改进表述"(需要定向修补) */
+export function riskWithoutFix(q: Question): boolean {
+  return q.答案要点.some((a) => RISK_RE.test(a)) && !q.答案要点.some((a) => FIX_RE.test(a));
 }
 
 /** 旧题库升级(0.8.0):读 questions.json 时把 string 追问归一为 FollowUp、补 难度分 兜底 */

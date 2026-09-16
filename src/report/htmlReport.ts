@@ -75,7 +75,7 @@ function questionCard(q: Question): string {
   const cites = q.代码依据.map((c) => `<code>${esc(c.file)}:${esc(c.lines)}</code>`).join(' ');
   const ol = q.答案要点.map((a) => `<li>${esc(a)}</li>`).join('');
   const follows = q.追问链
-    .map((f, i) => `<div class="follow">追问${i + 1}:${esc(f.问题)}${f.参考要点 ? ` <span class="follow-points">↳ ${esc(f.参考要点)}</span>` : ''}</div>`)
+    .map((f, i) => `<div class="follow">追问${i + 1}:${esc(f.问题)}${f.参考要点 ? ` <span class="follow-points">参考要点:${esc(f.参考要点)}</span>` : ''}</div>`)
     .join('');
   return `
 <article class="card" id="${esc(q.id)}" data-cat="${esc(q.category)}" data-diff="${esc(q.difficulty)}" data-must="${q.必考 ? 1 : 0}" data-text="${esc(searchText(q))}">

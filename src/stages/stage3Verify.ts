@@ -3,8 +3,9 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { DeepSeekClient, parseJsonLoose } from '../core/deepseek';
 import { RepoFacts, splitFileLines } from '../core/profiler';
-import { CodeCite, Question, VerificationResult, normalizeCiteLines, parseCiteRanges } from '../core/schemas';
-import { STAGE3_VERIFY_SYSTEM, stage3VerifyUser } from '../core/prompts';
+import { CodeCite, Question, VerificationResult, normalizeCiteLines, parseCiteRanges, MAX_CITE_SPAN, riskWithoutFix, FIX_RE, hasPresentationIssue } from '../core/schemas';
+import { STAGE3_VERIFY_SYSTEM, STAGE3_RISKFIX_SYSTEM, stage3VerifyUser } from '../core/prompts';
+import { DiskCache, PROMPT_VERSION } from '../core/cache';
 import { StageRunContext } from './stage1Read';
 import { log, warn } from '../core/logger';
 
@@ -183,7 +184,8 @@ export function sanitizeCitations(facts: RepoFacts, questions: Question[]): numb
         continue;
       }
       // start 已越过文件末尾 = 完全越界(整段删除;把 start"夹到末行"会凭空捏造引用);
-      // 只有 end 越界才截到文件实长
+      // 只有 end 越界才截到文件实长;跨度超过 MAX_CITE_SPAN 的段钳到该值
+      // (S 级要求引用"当场能翻到":约一屏内;过宽区间按起点保留前 MAX_CITE_SPAN 行并告警)
       const clamped: Array<[number, number]> = [];
       let droppedSeg = 0;
       for (const [s, e] of ranges) {
@@ -191,7 +193,12 @@ export function sanitizeCitations(facts: RepoFacts, questions: Question[]): numb
           droppedSeg++;
           continue;
         }
-        clamped.push([s, Math.min(e, total)]);
+        const capped = Math.min(e, total, s + MAX_CITE_SPAN - 1);
+        if (capped !== e) {
+          warn(`  [引用消毒] ${q.id}:${c.file} ${s}-${e} → ${s}-${capped}(跨度超 ${MAX_CITE_SPAN} 行,按起点保留供复核)`);
+          fixed++;
+        }
+        clamped.push([s, capped]);
       }
       if (droppedSeg) fixed++;
       if (!clamped.length) {
@@ -215,6 +222,127 @@ export function sanitizeCitations(facts: RepoFacts, questions: Question[]): numb
     }
   }
   return fixed;
+}
+
+/**
+ * 引用覆盖补齐(0.8.1,确定性):答案要点/追问参考要点里写明的 file:lines 是模型自己的引用主张,
+ * 但可能没进"代码依据"列表——背诵的内容明明指向某文件,依据列表却查无此事(S 级审计抓到的缺口)。
+ * 规则:解析要点文本中的 文件:行号 模式(文件必须真实存在于画像清单、行号可解析、跨度 ≤MAX_CITE_SPAN),
+ * 未被该题代码依据覆盖的真实引用自动补入;随后统一过 sanitizeCitations 消毒。返回补齐数。
+ */
+export function ensureCitationCoverage(facts: RepoFacts, questions: Question[]): number {
+  const filesSet = new Set(facts.files);
+  // 模型可能写全路径(src/store.js:30-60)或裸文件名(store.js:30-60):先精确,再按路径后缀归一
+  const CITE_IN_TEXT =
+    /\b([A-Za-z0-9_\-./\\]+\.(?:js|ts|jsx|tsx|mjs|cjs|py|go|java|kt|rb|php|cs|sql|json|yml|yaml|toml|html|css|md|vue|svelte|sh)):(\d+(?:\s*-\s*\d+)?(?:\s*,\s*\d+(?:\s*-\s*\d+)?)*)/g;
+  const resolveFile = (raw: string): string | null => {
+    const file = raw.replace(/^\.\//, '').replace(/\\/g, '/');
+    if (filesSet.has(file)) return file;
+    const suffixed = [...filesSet].find((f) => f === `src/${file}` || f.endsWith(`/${file}`));
+    return suffixed ?? null;
+  };
+  let added = 0;
+  for (const q of questions) {
+    const texts = [...q.答案要点, ...q.追问链.map((f) => `${f.问题} ${f.参考要点}`)];
+    const found = new Map<string, string>();
+    for (const t of texts) {
+      for (const m of t.matchAll(CITE_IN_TEXT)) {
+        const file = resolveFile(m[1]);
+        const lines = normalizeCiteLines(m[2]);
+        if (!file || !lines) continue;
+        if (!found.has(file)) found.set(file, lines);
+      }
+    }
+    for (const [file, lines] of found) {
+      if (q.代码依据.some((c) => c.file === file)) continue;
+      q.代码依据.push({ file, lines });
+      added++;
+    }
+  }
+  if (added) log(`  [引用覆盖补齐] 按要点中的 file:lines 主张补入 ${added} 条代码依据(随后统一消毒)`);
+  return added;
+}
+
+/**
+ * 阶段 3.6:风险给药定向修复(0.8.1,确定性触发 + LLM 定向修补)。
+ * 触发:答案要点指出风险/缺陷,却没有任何改进表述(riskWithoutFix,与 S 级审计同一把尺子)。
+ * 修补:LLM 按 STAGE3_RISKFIX_SYSTEM 重写该题要点;形状校验拒绝"仍无给药/含占位语/条数越界"的结果,
+ * 重试 ≤2 次,失败保留原样供人工复核。缓存键含提示词全文,改提示词自动失效。
+ */
+export async function repairRiskWithoutFix(
+  client: DeepSeekClient,
+  cache: DiskCache,
+  facts: RepoFacts,
+  questions: Question[],
+  outDir: string,
+  ctx: StageRunContext = {}
+): Promise<number> {
+  void outDir;
+  const need = questions.filter(riskWithoutFix);
+  if (!need.length) return 0;
+  log(`  [风险给药] ${need.length} 题指出风险但无改进方案,定向修补:${need.map((q) => q.id).join('、')}`);
+  const { excerpts } = deterministicCheck(facts, questions);
+  let repaired = 0;
+  for (const q of need) {
+    if (ctx.signal?.aborted) throw new Error('已取消');
+    const ex = (q.代码依据 || [])
+      .map((c) => excerpts.get(`${q.id}|${c.file}|${c.lines}`) ?? '')
+      .filter(Boolean)
+      .join('\n\n')
+      .slice(0, 5000);
+    const material = [
+      `# 题目\n${q.question}`,
+      `# 当前答案要点\n${q.答案要点.map((a, i) => `${i + 1}. ${a}`).join('\n')}`,
+      `# 引用处代码原文\n${ex || '(无摘录)'}`,
+    ].join('\n\n');
+    const key = cache.key('risk-fix', PROMPT_VERSION, STAGE3_RISKFIX_SYSTEM, q.id, material);
+    const tryApply = (text: string): boolean => {
+      try {
+        const parsed = parseJsonLoose<{ questions?: Array<{ id?: string; 答案要点?: unknown }> }>(text);
+        const items = (parsed?.questions ?? []).filter((x) => x && Array.isArray(x.答案要点));
+        // id 精确匹配优先;单题材料下模型偶把占位符抄进 id,此时唯一条目即目标题
+        const item = items.find((x) => String(x.id ?? '').trim() === q.id) ?? (items.length === 1 ? items[0] : undefined);
+        if (!item) return false;
+        const pts = Array.isArray(item.答案要点) ? item.答案要点.map(String).map((s) => s.trim()).filter(Boolean) : [];
+        if (pts.length < 3 || pts.length > 7) return false;
+        if (pts.some((p) => hasPresentationIssue(p))) return false;
+        if (!pts.some((p) => FIX_RE.test(p))) return false; // 修了但仍没给药 = 没修
+        q.答案要点 = pts;
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const cached = cache.get<string>(key);
+    if (typeof cached === 'string' && tryApply(cached)) {
+      repaired++;
+      continue;
+    }
+    let applied = false;
+    try {
+      for (let a = 0; a < 2 && !applied; a++) {
+        const raw = await client.chat(
+          [
+            { role: 'system', content: STAGE3_RISKFIX_SYSTEM },
+            { role: 'user', content: material },
+          ],
+          // 严格 JSON 输出路由到 chat 模型:flash 的推理预算会耗尽在结构化任务上(0.5.1 教训)
+          { requestType: 'stage3-riskfix', temperature: 0.1, jsonMode: true, maxTokens: 2200, hardMaxTokens: 4500, signal: ctx.signal, mode: ctx.mode }
+        );
+        if (tryApply(raw)) {
+          cache.set(key, raw);
+          applied = true;
+        }
+      }
+    } catch (err) {
+      if (String(err instanceof Error ? err.message : err) === '已取消') throw err;
+      warn(`  [风险给药] ${q.id} 修补请求失败:${err instanceof Error ? err.message : err}`);
+    }
+    if (applied) repaired++;
+    else warn(`  [风险给药] ${q.id} 未通过形状校验(保留原样,供人工复核)`);
+  }
+  if (repaired) log(`  [风险给药] 修补完成 ${repaired}/${need.length} 题`);
+  return repaired;
 }
 
 interface CheckpointEntry extends VerificationResult {

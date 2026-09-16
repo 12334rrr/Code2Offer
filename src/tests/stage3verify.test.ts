@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
-import { deterministicCheck, sanitizeCitations } from '../stages/stage3Verify';
+import { deterministicCheck, sanitizeCitations, ensureCitationCoverage } from '../stages/stage3Verify';
 import { RepoFacts } from '../core/profiler';
 import { Question } from '../core/schemas';
 import { makeTempDir, write, cleanup } from './helpers';
@@ -118,5 +118,55 @@ test('runStage3:校验批次有界并发且 checkpoint 合并不丢题', async (
     assert.ok(peak <= 3, `并发峰值 ${peak} 超过保守上限`);
     const checkpoint = JSON.parse(fs.readFileSync(`${dir}/.verify-progress.json`, 'utf8'));
     assert.equal(checkpoint.length, 25);
+  } finally { cleanup(dir); }
+});
+
+test('ensureCitationCoverage:要点主张的 file:lines 补入代码依据;不存在/已覆盖的不动', () => {
+  const dir = makeTempDir();
+  try {
+    const facts = mkFacts(dir, ['src/store.js', 'src/cache.js']);
+    const mk = (points: string[], follows: string[]): Question => ({
+      id: 'Q01', category: '核心模块深挖', difficulty: '基础', question: '足够长的问题文本', 考察点: 'k',
+      答案要点: points, 代码依据: [{ file: 'src/cache.js', lines: '1-3' }],
+      追问链: follows.map((f) => ({ 问题: f, 参考要点: '参考要点说明内容' })),
+      加分回答: 'g', 常见错误回答: 'w',
+    });
+    const q = mk(
+      ['核心在 src/store.js:30-60 的索引维护,先 _unindex 再 _index', '缓存见 src/missing.js:1-9(不存在,不补)'],
+      ['与 src/store.js:70-79 的关系?'],
+    );
+    const added = ensureCitationCoverage(facts, [q]);
+    assert.equal(added, 1, `应只补 store.js 一条,实际 ${added}`);
+    assert.ok(q.代码依据.some((c) => c.file === 'src/store.js' && c.lines === '30-60'));
+    assert.ok(!q.代码依据.some((c) => c.file === 'src/missing.js'));
+    assert.equal(q.代码依据.filter((c) => c.file === 'src/cache.js').length, 1, '已覆盖文件不重复补');
+  } finally { cleanup(dir); }
+});
+
+test('repairRiskWithoutFix:风险无给药定向修补;无给药结果被拒绝', async () => {
+  const { DiskCache } = await import('../core/cache');
+  const dir = makeTempDir();
+  try {
+    write(dir, 'a.ts', 'const cache = new Map();\nexport function get(k) { return cache.get(k); }\n');
+    const facts = mkFacts(dir, ['a.ts']);
+    const risky = { ...mkQ([{ file: 'a.ts', lines: '1-2' }]), id: 'Q01', 答案要点: ['缓存无淘汰策略,长期运行会内存泄漏(a.ts:1)'] };
+    const ok = { ...mkQ([{ file: 'a.ts', lines: '1-2' }]), id: 'Q02', 答案要点: ['读取走 Map 直查,均摊 O(1)'] };
+    let calls = 0;
+    const client = {
+      chat: async () => {
+        calls++;
+        return JSON.stringify({ questions: [{ id: 'Q01', 答案要点: ['缓存无淘汰策略,长期运行会内存泄漏(a.ts:1)', '改进:加 TTL 上限并在超过容量时全量清扫,补一条泄漏回归测试断言', '读取走 Map 直查,均摊 O(1)'] }] });
+      },
+    } as any;
+    const cache = new DiskCache(`${dir}/.cache`);
+    const { repairRiskWithoutFix } = await import('../stages/stage3Verify');
+    const repaired = await repairRiskWithoutFix(client, cache, facts, [risky, ok], dir, {});
+    assert.equal(repaired, 1, '只修补 Q01');
+    assert.ok(risky.答案要点.some((a) => /改进|清扫|测试/.test(a)), 'Q01 要点已含给药');
+    assert.deepEqual(ok.答案要点, ['读取走 Map 直查,均摊 O(1)'], '合规题不动');
+    // 再跑一次:已给药 → 不触发,不再调用
+    const repaired2 = await repairRiskWithoutFix(client, cache, facts, [risky, ok], dir, {});
+    assert.equal(repaired2, 0);
+    assert.equal(calls, 1);
   } finally { cleanup(dir); }
 });

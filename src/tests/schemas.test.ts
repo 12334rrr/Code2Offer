@@ -109,6 +109,10 @@ test('validateQuestion:拒绝不可背诵的占位符和模糊定位', () => {
   assert.ok(errors.some((e) => /不可背诵/.test(e)));
   assert.equal(hasPresentationIssue('第 70-140 行段内处理'), true);
   assert.equal(hasPresentationIssue('读取请求后校验 title 字段'), false);
+  // 0.8.1:证据元话语型答案(讨论证据,不回答问题)确定性拒绝
+  assert.equal(hasPresentationIssue('update 方法体未被任何引用行覆盖,其内部步骤无法从现有代码证实'), true);
+  assert.equal(hasPresentationIssue('这属于未经验证的推断,不能作为答案陈述'), true);
+  assert.equal(hasPresentationIssue('该字段当前未被任何路由使用,属于冗余配置'), false); // 正常的代码事实陈述不受影响
 });
 
 /* ---------------- 0.8.0 题库可背诵性契约 ---------------- */
