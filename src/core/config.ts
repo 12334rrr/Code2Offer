@@ -7,8 +7,10 @@ export interface AppConfig {
   model: string;
   /** 单请求超时毫秒数(推理模型较慢,默认 300 秒) */
   timeoutMs?: number;
+  /** 可选联网增强密钥；不接受被分析仓库的配置。 */
+  tavilyApiKey?: string;
   /** 各字段实际来源(排查配置问题用;密钥只显示来源文件,不显示值) */
-  sources: { apiKey: string; baseUrl: string; model: string };
+  sources: { apiKey: string; baseUrl: string; model: string; tavilyApiKey?: string };
 }
 
 export interface LoadConfigOptions {
@@ -85,6 +87,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): AppConfig {
       DEEPSEEK_BASE_URL: env.DEEPSEEK_BASE_URL ?? '',
       DEEPSEEK_MODEL: env.DEEPSEEK_MODEL ?? '',
       DEEPSEEK_TIMEOUT_MS: env.DEEPSEEK_TIMEOUT_MS ?? '',
+      TAVILY_API_KEY: env.TAVILY_API_KEY ?? '',
     } },
   ];
   for (const dir of opts.trustedDirs ?? []) {
@@ -138,6 +141,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): AppConfig {
   }
 
   const modelHit = first('DEEPSEEK_MODEL');
+  const tavilyHit = sources.filter((s) => s.rank <= 2).map((s) => ({ val: s.vars.TAVILY_API_KEY, src: s })).find((hit) => Boolean(hit.val));
   const timeoutRaw = first('DEEPSEEK_TIMEOUT_MS').val;
   let timeoutMs: number | undefined;
   if (timeoutRaw) {
@@ -151,10 +155,12 @@ export function loadConfig(opts: LoadConfigOptions = {}): AppConfig {
     baseUrl,
     model: modelHit.val || 'deepseek-chat',
     timeoutMs,
+    tavilyApiKey: tavilyHit?.val,
     sources: {
       apiKey: keyHit.src?.name ?? '(未知)',
       baseUrl: baseUrlSrc,
       model: modelHit.src?.name ?? '默认(deepseek-chat)',
+      tavilyApiKey: tavilyHit?.src.name,
     },
   });
 }

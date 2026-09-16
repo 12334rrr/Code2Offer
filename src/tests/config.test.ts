@@ -80,3 +80,14 @@ test('loadConfig:overrides 模型名优先于一切文件', () => {
 test('loadConfig:缺密钥给出可操作错误', () => {
   assert.throws(() => loadConfig({ env: {}, trustedDirs: [], repoDir: undefined }), /DEEPSEEK_API_KEY/);
 });
+
+test('loadConfig:Tavily 密钥只从环境变量或受信目录读取，不信任被分析仓库 .env', () => {
+  const host = makeTempDir('cip-host-');
+  const repo = makeTempDir('cip-repo-');
+  try {
+    write(host, '.env', 'DEEPSEEK_API_KEY=sk-host\nTAVILY_API_KEY=tvly-host\n');
+    write(repo, '.env', 'TAVILY_API_KEY=tvly-untrusted\n');
+    assert.equal(loadConfig({ env: {}, trustedDirs: [host], repoDir: repo }).tavilyApiKey, 'tvly-host');
+    assert.equal(loadConfig({ env: { DEEPSEEK_API_KEY: 'sk-env' }, trustedDirs: [], repoDir: repo }).tavilyApiKey, undefined);
+  } finally { cleanup(host); cleanup(repo); }
+});

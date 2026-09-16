@@ -13,6 +13,7 @@ import { ModuleCard, ProjectKnowledge } from '../core/schemas';
 import { RunMode } from '../core/policy';
 import { repoRootOfOutput } from '../core/runs';
 import { diagnoseDeepSeek } from '../core/diagnostics';
+import { TavilyResearch } from '../core/webResearch';
 
 const VERSION = '0.5.2';
 
@@ -39,6 +40,9 @@ const USAGE = `代码转面试 ${VERSION} — 读取完整代码仓库,生成真
   code2offer diagnose
       使用与生成完全相同的配置和网络客户端发送最小 JSON 请求；不读取或发送仓库源码
 
+  code2offer research --query <公开技术问题>
+      可选 Tavily 联网参考；只允许公开技术查询，不读取或发送仓库源码
+
   code2offer --version | --help
 
 示例:
@@ -49,7 +53,7 @@ const USAGE = `代码转面试 ${VERSION} — 读取完整代码仓库,生成真
 `;
 
 /** 值旗标(消耗下一个参数);其余 --xxx 一律按布尔处理 */
-const VALUE_FLAGS = new Set(['jd', 'out', 'mode', 'max-files', 'count', 'category']);
+const VALUE_FLAGS = new Set(['jd', 'out', 'mode', 'max-files', 'count', 'category', 'query']);
 
 export interface ParsedArgs {
   flags: Record<string, string | boolean>;
@@ -201,6 +205,14 @@ async function main(): Promise<void> {
       const result = await diagnoseDeepSeek(cfg);
       console.log(JSON.stringify(result, null, 2));
       if (!result.ok) process.exitCode = 2;
+      break;
+    }
+    case 'research': {
+      if (typeof flags.query !== 'string') throw new Error('research 需要 --query <公开技术问题>');
+      const cfg = loadConfig({ trustedDirs: [process.cwd(), toolRootDir()] });
+      const research = new TavilyResearch({ apiKey: cfg.tavilyApiKey, cacheDir: path.join(process.cwd(), '.interview-cache', 'tavily') });
+      if (!research.enabled()) throw new Error('未配置 TAVILY_API_KEY。请在系统环境变量或工具目录 .env 设置；被分析仓库 .env 不会被读取。');
+      console.log(JSON.stringify(await research.searchPublicTechnicalFact(flags.query), null, 2));
       break;
     }
     default:
