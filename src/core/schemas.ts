@@ -5,12 +5,43 @@
 
 export const DIFFICULTIES = ['基础', '进阶', '刁钻'] as const;
 /** Bump when deterministic user-facing question validation semantics change. */
-export const QUESTION_VALIDATION_VERSION = '2';
+export const QUESTION_VALIDATION_VERSION = '3';
 export type Difficulty = (typeof DIFFICULTIES)[number];
+
+/** 单条代码依据允许的最大行跨度(0.8.0 起,S 级要求"题题精确定位",禁止文件级/整文件引用) */
+export const MAX_CITE_SPAN = 80;
 
 export interface CodeCite {
   file: string;
   lines: string; // 如 "12-34" 或 "12"
+}
+
+/** 追问(0.8.0):开放式追问必须给可直接背诵的标准答案要点——只问不答等于让候选人自己补全 */
+export interface FollowUp {
+  问题: string;
+  参考要点: string;
+}
+
+/** 兼容旧题库(string 追问)与新模型输出的对象追问,统一成 FollowUp */
+export function normalizeFollowUps(v: unknown): FollowUp[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((x): FollowUp => {
+      if (typeof x === 'string') return { 问题: x.trim(), 参考要点: '' };
+      const o = (x ?? {}) as Record<string, any>;
+      return {
+        问题: String(o.问题 ?? o.question ?? '').trim(),
+        参考要点: String(o.参考要点 ?? o.points ?? '').trim(),
+      };
+    })
+    .filter((f) => f.问题);
+}
+
+/** 题位难度标签 → 量化难度分:模型给了数值就钳制到 1-10(保留意图);缺失/非法时按标签确定性兜底 */
+export function difficultyScoreOf(d: Difficulty, v: unknown): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (Number.isFinite(n)) return Math.min(10, Math.max(1, Math.round(n)));
+  return d === '基础' ? 3 : d === '进阶' ? 6 : 8;
 }
 
 /** 横向对比块:用户核心要求——凡"为什么用 X"必须给出方案×维度的客观对比 */
@@ -25,12 +56,14 @@ export interface Question {
   id: string;
   category: string;
   difficulty: Difficulty;
+  /** 量化难度 1-10(0.8.0 起):1-3 记忆/复述,4-6 原理理解,7-8 权衡设计,9-10 底层实现/极端场景 */
+  难度分?: number;
   target?: string; // 目标模块/文件
   question: string;
   考察点: string;
   答案要点: string[];
   代码依据: CodeCite[];
-  追问链: string[];
+  追问链: FollowUp[];
   加分回答: string;
   常见错误回答: string;
   对比?: ComparisonBlock;
@@ -142,15 +175,27 @@ export function validateQuestion(q: unknown, files: Set<string>): string[] {
   const presentationFields: Array<[string, unknown]> = [
     ['question', o.question], ['考察点', o.考察点], ['加分回答', o.加分回答], ['常见错误回答', o.常见错误回答],
     ...(Array.isArray(o.答案要点) ? (o.答案要点 as unknown[]).map((v, i) => [`答案要点[${i}]`, v] as [string, unknown]) : []),
-    ...(Array.isArray(o.追问链) ? (o.追问链 as unknown[]).map((v, i) => [`追问链[${i}]`, v] as [string, unknown]) : []),
   ];
   for (const [field, value] of presentationFields) {
     if (typeof value === 'string' && hasPresentationIssue(value)) errors.push(`${field} 含不可背诵的占位/模糊定位/过程性措辞`);
   }
 
-  // 追问链 >= 2
-  if (!Array.isArray(o.追问链) || o.追问链.length < 2 || !o.追问链.every((x) => typeof x === 'string')) {
+  // 追问链(0.8.0):≥2 条,且每条开放式追问必须带可直接背诵的参考要点
+  const followUps = normalizeFollowUps(o.追问链);
+  if (followUps.length < 2) {
     errors.push('追问链 至少 2 条');
+  } else {
+    followUps.forEach((f, i) => {
+      if (hasPresentationIssue(f.问题)) errors.push(`追问链[${i}].问题 含不可背诵的占位/模糊定位/过程性措辞`);
+      if (f.参考要点.length < 10) errors.push(`追问链[${i}] 缺少参考要点(开放式追问必须给标准答案要点,不能只问不答)`);
+      else if (hasPresentationIssue(f.参考要点)) errors.push(`追问链[${i}].参考要点 含不可背诵的占位/模糊定位/过程性措辞`);
+    });
+  }
+
+  // 量化难度分(0.8.0):给就必须是 1-10
+  if (o.难度分 !== undefined && o.难度分 !== null) {
+    const n = Number(o.难度分);
+    if (!Number.isFinite(n) || n < 1 || n > 10) errors.push(`难度分 必须是 1-10 的数字,得到:${String(o.难度分)}`);
   }
 
   // 代码依据:非空,且文件必须真实存在
@@ -169,6 +214,12 @@ export function validateQuestion(q: unknown, files: Set<string>): string[] {
       }
       if (typeof cc.lines !== 'string' || !parseCiteRanges(cc.lines)) {
         errors.push(`代码依据 lines 格式应为 "12" / "12-34" / "12-34,56-78",得到:${String(cc.lines)}`);
+        continue;
+      }
+      // S 级"题题精确定位":单段行跨度超限 = 文件级/整文件式引用,背诵与复核都无法落地
+      const wide = (parseCiteRanges(cc.lines) ?? []).find(([s, e]) => e - s + 1 > MAX_CITE_SPAN);
+      if (wide) {
+        errors.push(`代码依据 ${cc.file} 引用区间 ${wide[0]}-${wide[1]} 跨度超过 ${MAX_CITE_SPAN} 行,必须定位到具体实现段落(单条 ≤${MAX_CITE_SPAN} 行)`);
       }
     }
   }
@@ -222,6 +273,7 @@ export function coerceQuestion(raw: unknown, id: string, category: string, diffi
     id,
     category,
     difficulty,
+    难度分: difficultyScoreOf(difficulty, o.难度分 ?? o.difficultyScore),
     target,
     question: String(o.question ?? ''),
     考察点: String(o.考察点 ?? ''),
@@ -232,7 +284,7 @@ export function coerceQuestion(raw: unknown, id: string, category: string, diffi
           lines: normalizeCiteLines(c?.lines) ?? String(c?.lines ?? ''),
         }))
       : [],
-    追问链: cleanArr(o.追问链).slice(0, 4),
+    追问链: normalizeFollowUps(o.追问链).slice(0, 4),
     加分回答: String(o.加分回答 ?? ''),
     常见错误回答: String(o.常见错误回答 ?? ''),
     对比: o.对比
@@ -243,5 +295,14 @@ export function coerceQuestion(raw: unknown, id: string, category: string, diffi
           结论: String(o.对比.结论 ?? ''),
         }
       : undefined,
+  };
+}
+
+/** 旧题库升级(0.8.0):读 questions.json 时把 string 追问归一为 FollowUp、补 难度分 兜底 */
+export function normalizeQuestionLegacy(q: Question): Question {
+  return {
+    ...q,
+    难度分: difficultyScoreOf(q.difficulty, q.难度分),
+    追问链: normalizeFollowUps(q.追问链),
   };
 }

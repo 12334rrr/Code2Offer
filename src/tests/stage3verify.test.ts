@@ -32,7 +32,7 @@ const mkQ = (cites: Array<{ file: string; lines: string }>): Question => ({
   考察点: 'x',
   答案要点: ['a'],
   代码依据: cites,
-  追问链: ['x'],
+  追问链: [{ 问题: 'x', 参考要点: '参考要点说明内容' }],
   加分回答: 'g',
   常见错误回答: 'w',
 });

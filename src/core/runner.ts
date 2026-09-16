@@ -7,7 +7,8 @@ import { profileRepo, snapshotRepo } from './profiler';
 import { loadChunks } from './chunker';
 import { DiskCache, PROMPT_VERSION } from './cache';
 import { totalQuota, trimToQuotaDetailed } from './coverage';
-import { Question, isValidComparison, QUESTION_VALIDATION_VERSION } from './schemas';
+import { Question, isValidComparison, QUESTION_VALIDATION_VERSION, normalizeQuestionLegacy } from './schemas';
+import { STAGE5_NARRATIVE_SYSTEM, STAGE5_HIGHLIGHTS_SYSTEM, STAGE5_WEAKNESS_SYSTEM, STAGE5_DECISIONS_SYSTEM } from './prompts';
 import { log, warn, withLogSink, LogSink } from './logger';
 import { runStage1, StageRunContext } from '../stages/stage1Read';
 import { runStage2, repairComparisons, repairAnnotationAnswers, rewriteFlaggedAnswers, resetVerifyCheckpoint } from '../stages/stage2Questions';
@@ -297,7 +298,8 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     stageBegin('read', '模块精读');
     const overviewJsonHash = sha1(JSON.stringify(facts.overview));
     const chunksHash = sha1(chunks.map((c) => `${c.file}:${c.startLine}-${c.endLine}:${c.content}`).join('||'));
-    const s1Hash = shortHash(`v2|${overviewJsonHash}|${chunksHash}|${cfg.model}`);
+    // 门控纳入提示词版本:提示词演进(如 0.8.0 题库可背诵性)必然触发重读
+    const s1Hash = shortHash(`v3|${PROMPT_VERSION}|${overviewJsonHash}|${chunksHash}|${cfg.model}`);
     let cards, knowledge;
     let readCached = false;
     if (stageDone('read', s1Hash)) {
@@ -326,7 +328,8 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     let questions: Question[];
     let questionsReused = false;
     if (stageDone('questions', s2Hash) && fs.existsSync(qPath)) {
-      questions = JSON.parse(fs.readFileSync(qPath, 'utf-8'));
+      // 旧题库归一化:string 追问 → FollowUp、难度分兜底(0.8.0 契约)
+      questions = (JSON.parse(fs.readFileSync(qPath, 'utf-8')) as Question[]).map(normalizeQuestionLegacy);
       questionsReused = true;
       log(`  [门控命中] 题库已存在(${questions.length} 题),直接复用`);
     } else {
@@ -450,7 +453,9 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     banner('阶段 5:总装输出(MD 套件 + HTML 报告)');
     stageBegin('assemble', '总装输出');
     const outputNames = ['01_项目讲解.md', '02_百问百答.md', '03_亮点与防守.md', '04_缺点与改进.md', '05_设计决策与选型对比.md', '06_速记卡.md', 'index.html'];
-    const s5Hash = shortHash(`v2|${sha1(JSON.stringify(facts))}|${sha1(JSON.stringify(cards))}|${sha1(JSON.stringify(knowledge))}|${sha1(JSON.stringify(questions))}|${sha1(JSON.stringify(jd ?? null))}|${cfg.model}`);
+    // 总装门控纳入四份叙述稿提示词全文:改提示词任何一字,总装重算(缓存键另有提示词全文)
+    const s5PromptsHash = sha1(STAGE5_NARRATIVE_SYSTEM + STAGE5_HIGHLIGHTS_SYSTEM + STAGE5_WEAKNESS_SYSTEM + STAGE5_DECISIONS_SYSTEM);
+    const s5Hash = shortHash(`v3|${s5PromptsHash}|${sha1(JSON.stringify(facts))}|${sha1(JSON.stringify(cards))}|${sha1(JSON.stringify(knowledge))}|${sha1(JSON.stringify(questions))}|${sha1(JSON.stringify(jd ?? null))}|${cfg.model}`);
     if (stageDone('assemble', s5Hash) && outputNames.every((name) => fs.existsSync(path.join(outDir, name)))) {
       log('  [门控命中] 总装产物已存在,直接复用');
       stageEnd('assemble', '总装输出', 'cached', '门控命中,复用 Markdown + HTML');
@@ -464,7 +469,7 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     client.printUsage();
     const quality = writeQualityArtifacts(outDir, facts, cards, questions);
     const manifest = {
-      schemaVersion: 1, toolVersion: '0.7.0', generatedAt: new Date().toISOString(), mode: opts.mode ?? 'balanced',
+      schemaVersion: 1, toolVersion: '0.8.0', generatedAt: new Date().toISOString(), mode: opts.mode ?? 'balanced',
       model: client.model, endpoint: cfg.baseUrl, configSources: cfg.sources, promptVersion: PROMPT_VERSION,
       repository: { root, snapshotHash: facts.snapshotHash ?? currentSnapshot, files: facts.overview.totalFiles, loc: facts.overview.totalLOC },
       ignored: facts.skippedByReason ?? {}, stageHashes: state.stages, stageDurations, usage: client.usage(), cache: cache.stats(), quality,

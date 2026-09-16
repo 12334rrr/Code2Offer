@@ -62,7 +62,7 @@ function searchText(q: Question): string {
     q.question,
     q.答案要点.join(' '),
     q.考察点,
-    (q.追问链 ?? []).join(' '),
+    (q.追问链 ?? []).map((f) => `${f.问题} ${f.参考要点}`).join(' '),
     q.加分回答,
     q.常见错误回答,
     cmpText,
@@ -74,13 +74,15 @@ function searchText(q: Question): string {
 function questionCard(q: Question): string {
   const cites = q.代码依据.map((c) => `<code>${esc(c.file)}:${esc(c.lines)}</code>`).join(' ');
   const ol = q.答案要点.map((a) => `<li>${esc(a)}</li>`).join('');
-  const follows = q.追问链.map((f, i) => `<div class="follow">追问${i + 1}:${esc(f)}</div>`).join('');
+  const follows = q.追问链
+    .map((f, i) => `<div class="follow">追问${i + 1}:${esc(f.问题)}${f.参考要点 ? ` <span class="follow-points">↳ ${esc(f.参考要点)}</span>` : ''}</div>`)
+    .join('');
   return `
 <article class="card" id="${esc(q.id)}" data-cat="${esc(q.category)}" data-diff="${esc(q.difficulty)}" data-must="${q.必考 ? 1 : 0}" data-text="${esc(searchText(q))}">
   <div class="card-head">
     <span class="qid">${esc(q.id)}</span>
     <span class="chip cat">${esc(q.category)}</span>
-    <span class="chip d-${esc(q.difficulty)}">${esc(q.difficulty)}</span>
+    <span class="chip d-${esc(q.difficulty)}">${esc(q.difficulty)}${q.难度分 !== undefined ? ` ${q.难度分}/10` : ''}</span>
     ${q.必考 ? '<span class="chip must">⭐必考</span>' : ''}
     ${verifyBadge(q)}
     <span class="target">${esc(q.target && q.target !== '项目整体' ? q.target : '')}</span>
@@ -204,6 +206,7 @@ h3.q{margin:8px 0 4px;font-size:15px;line-height:1.5}
 .answer.hidden{display:none}
 .answer ol{margin:4px 0 8px;padding-left:22px}
 .follow{color:#475569;margin:2px 0}
+.follow-points{color:#64748b;font-size:12px}
 .wrong{color:#7f1d1d;background:#fef2f2;border-radius:6px;padding:6px 10px}
 .warn{color:#991b1b;background:#fee2e2;border-radius:6px;padding:6px 10px}
 body.dark .wrong,body.dark .warn{color:#fecaca;background:#451a1a}

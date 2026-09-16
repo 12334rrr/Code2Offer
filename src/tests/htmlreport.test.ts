@@ -22,7 +22,7 @@ const mkQ = (over: Partial<Question> = {}): Question => ({
   考察点: '考察 "点" & <b>',
   答案要点: ['要点 <img src=x onerror=alert(1)>'],
   代码依据: [{ file: 'src/a.ts', lines: '1-9' }],
-  追问链: ['追问 1'],
+  追问链: [{ 问题: '追问 1', 参考要点: '参考要点说明内容' }],
   加分回答: '加分 \' 引号',
   常见错误回答: '错误 "双引号"',
   ...over,

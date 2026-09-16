@@ -138,7 +138,7 @@ export function comparisonTableMd(q: Question): string[] {
 
 function questionMd(q: Question): string[] {
   const lines: string[] = [];
-  lines.push(`### ${q.id}〔${q.difficulty}〕${q.必考 ? '⭐必考 ' : ''}${sanitizeMdInline(q.question)}`);
+  lines.push(`### ${q.id}〔${q.difficulty}${q.难度分 !== undefined ? ` · 难度 ${q.难度分}/10` : ''}〕${q.必考 ? '⭐必考 ' : ''}${sanitizeMdInline(q.question)}`);
   lines.push('');
   lines.push(`- 考察点:${sanitizeMdInline(q.考察点)}${q.target && q.target !== '项目整体' ? `(目标:${sanitizeMdInline(q.target)})` : ''}`);
   lines.push(`- 代码依据:${q.代码依据.map((c) => `\`${sanitizeMdInline(c.file)}:${c.lines}\``).join('、') || '(无)'}`);
@@ -149,7 +149,12 @@ function questionMd(q: Question): string[] {
   q.答案要点.forEach((a, i) => lines.push(`${i + 1}. ${sanitizeMdInline(a)}`));
   lines.push('');
   if (q.追问链.length) {
-    lines.push(`**追问链:** ${q.追问链.map((f, i) => `${i + 1}) ${sanitizeMdInline(f)}`).join('  ')}`);
+    lines.push('**追问链(含参考要点):**');
+    lines.push('');
+    q.追问链.forEach((f, i) => {
+      lines.push(`${i + 1}. ${sanitizeMdInline(f.问题)}`);
+      if (f.参考要点) lines.push(`   - ↳ 参考要点:${sanitizeMdInline(f.参考要点)}`);
+    });
     lines.push('');
   }
   lines.push(`**加分回答:** ${sanitizeMdInline(q.加分回答)}`);
