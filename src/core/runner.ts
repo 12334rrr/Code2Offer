@@ -393,6 +393,11 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
         saveState('verify', s3HashOf());
       }
     }
+    // Stage 3 can replace answer points while applying a factual correction.
+    // Re-run the same self-contained-answer repair gate after that writeback;
+    // otherwise phrases such as "line 104 nearby" bypass the Stage 2 gate.
+    const postVerifyPresentationRepairs = await repairAnnotationAnswers(client, cache, facts, questions, outDir, ctx);
+    if (postVerifyPresentationRepairs) log(`  对抗校验后实质化修复:${postVerifyPresentationRepairs} 题`);
     reportUsage();
 
     /* ---------- 阶段 3.5:标红题答案重写(反幻觉闭环) ---------- */

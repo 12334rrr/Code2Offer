@@ -4,7 +4,7 @@ import { DeepSeekClient, parseJsonLoose } from '../core/deepseek';
 import { RepoFacts } from '../core/profiler';
 import { Chunk } from '../core/chunker';
 import { DiskCache, PROMPT_VERSION } from '../core/cache';
-import { ModuleCard, ProjectKnowledge, Question, coerceQuestion, validateQuestion } from '../core/schemas';
+import { ModuleCard, ProjectKnowledge, Question, coerceQuestion, hasPresentationIssue, validateQuestion } from '../core/schemas';
 import { Slot, buildSlots, totalQuota, computeDeficitSlots } from '../core/coverage';
 import { STAGE2_SYSTEM, STAGE2_REPAIR_SYSTEM, STAGE2_CMP_REPAIR_SYSTEM, STAGE2_POINTS_REPAIR_SYSTEM, STAGE2_FLAG_REWRITE_SYSTEM, Stage2BatchInput, stage2BatchUser, stage2RepairUser, stage2CmpRepairUser, stage2PointsRepairUser, stage2FlagRewriteUser, STAGE2_TOPUP_USER_HINT } from '../core/prompts';
 import { requiresComparison } from '../core/coverage';
@@ -426,7 +426,7 @@ const META_POINT_RE =
   /不要合并引用|行号(应为|不准|有误)|对比块需|要点需|引用(需|应为|校订)|实际(从|是).{0,12}(开始|行)|与代码(不符|不一致)|需补充|需核对|待核|请候选人/;
 
 export function hasAnnotationStylePoints(q: Question): boolean {
-  return q.答案要点.some((a) => META_POINT_RE.test(a));
+  return q.答案要点.some((a) => META_POINT_RE.test(a) || hasPresentationIssue(a));
 }
 
 /** 要点不足 3 条(常见于校验修复轮被截断),与批注式要点一样需要重写 */
