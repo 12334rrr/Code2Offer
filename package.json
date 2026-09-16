@@ -1,6 +1,6 @@
 {
   "name": "code2offer",
-  "version": "0.4.0",
+  "version": "0.5.2",
   "private": true,
   "description": "Code2Offer(代码转面试):读取完整代码仓库,用 DeepSeek 生成真实面试场景全套材料(项目讲解/百问百答/亮点防守/缺点改进/选型横向对比/HTML报告/模拟排练)",
   "repository": {
@@ -12,12 +12,17 @@
   },
   "scripts": {
     "build": "tsc -p .",
+    "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "generate": "node dist/cli/index.js generate",
     "rehearse": "node dist/cli/index.js rehearse",
     "export-prompts": "node dist/cli/index.js export-prompts docs/prompts",
     "demo": "npm run build && node dist/cli/index.js generate ./example-demo --jd example-demo/jd.txt",
     "demo:rehearse": "node dist/cli/index.js rehearse ./example-demo/interview-output --count 3",
-    "test": "npm run build && node --test \"dist/tests/*.test.js\""
+    "test": "npm run clean:dist && npm run build && node --test \"dist/tests/*.test.js\"",
+    "test:mock-api": "npm run build && node audit/mock-api-contract.cjs",
+    "test:performance": "npm run build && node audit/performance-mock.cjs",
+    "test:extension-host": "node audit/extension-host-smoke.cjs",
+    "test:vsix": "node audit/vsix-content-check.cjs && node audit/activation-smoke.cjs"
   },
   "engines": {
     "node": ">=18"

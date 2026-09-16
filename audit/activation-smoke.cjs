@@ -3,17 +3,48 @@
  * 目的:回答"这样发布后能否正常使用"——加载、命令注册、配置缺失报错、报告 CSP 注入、设置跳转。
  * 运行:node audit/activation-smoke.cjs (项目根目录)
  */
-const { execSync } = require('child_process');
 const fs = require('fs');
+const zlib = require('zlib');
 const os = require('os');
 const path = require('path');
 const assert = require('assert');
 const crypto = require('crypto');
 
-const VSIX = path.resolve(__dirname, '../vscode/code-interview-prep-0.4.0.vsix');
+const VSIX = path.resolve(__dirname, '../vscode/code-interview-prep-0.5.2.vsix');
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'cip-smoke-'));
 const extracted = path.join(work, 'extension.js');
-fs.writeFileSync(extracted, execSync(`unzip -p "${VSIX}" extension/dist/extension.js`));
+
+// Windows CI does not guarantee unzip/tar. Read the VSIX as a ZIP with Node's
+// built-in zlib so this smoke test exercises the actual published bundle.
+function readZipEntry(zipPath, wanted) {
+  const buf = fs.readFileSync(zipPath);
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= 0; i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error('VSIX 不是合法 ZIP');
+  const count = buf.readUInt16LE(eocd + 10);
+  const cdOffset = buf.readUInt32LE(eocd + 16);
+  let pos = cdOffset;
+  for (let i = 0; i < count; i++) {
+    if (buf.readUInt32LE(pos) !== 0x02014b50) throw new Error('ZIP 中央目录损坏');
+    const method = buf.readUInt16LE(pos + 10);
+    const compressedSize = buf.readUInt32LE(pos + 20);
+    const nameLen = buf.readUInt16LE(pos + 28);
+    const extraLen = buf.readUInt16LE(pos + 30);
+    const commentLen = buf.readUInt16LE(pos + 32);
+    const name = buf.subarray(pos + 46, pos + 46 + nameLen).toString('utf8');
+    const localOffset = buf.readUInt32LE(pos + 42);
+    if (name === wanted) {
+      if (buf.readUInt32LE(localOffset) !== 0x04034b50) throw new Error('ZIP 本地头损坏');
+      const localNameLen = buf.readUInt16LE(localOffset + 26);
+      const localExtraLen = buf.readUInt16LE(localOffset + 28);
+      const data = buf.subarray(localOffset + 30 + localNameLen + localExtraLen, localOffset + 30 + localNameLen + localExtraLen + compressedSize);
+      return method === 0 ? data : method === 8 ? zlib.inflateRawSync(data) : (() => { throw new Error(`不支持 ZIP 压缩方式 ${method}`); })();
+    }
+    pos += 46 + nameLen + extraLen + commentLen;
+  }
+  throw new Error(`VSIX 缺少 ${wanted}`);
+}
+fs.writeFileSync(extracted, readZipEntry(VSIX, 'extension/dist/extension.js'));
 
 // 0. 确认包内产物与本地构建一致
 const local = path.resolve(__dirname, '../vscode/dist/extension.js');
@@ -50,7 +81,9 @@ const vscode = {
     showErrorMessage: (m, ...b) => { reg.errors.push(m); return Promise.resolve(undefined); },
     showInformationMessage: (m, ...b) => { reg.infos.push(m); return Promise.resolve(undefined); },
     showWarningMessage: (m, ...b) => { reg.warnings.push(m); return Promise.resolve(undefined); },
-    showQuickPick: (items) => Promise.resolve({ label: '不使用 JD', value: false }),
+    // 生成流程的一串 quickpick 都取第一项:模式=balanced、输出方式=自动独立目录、JD=不使用
+    showQuickPick: (items) => Promise.resolve(items?.[0]),
+    showInputBox: () => Promise.resolve('1'),
     showOpenDialog: () => Promise.resolve(undefined),
     showWorkspaceFolderPick: () => Promise.resolve(undefined),
     withProgress: (opts, task) => task({ report: () => {} }, { isCancellationRequested: false, onCancellationRequested: () => D }),
@@ -64,6 +97,7 @@ const vscode = {
     workspaceFolders: undefined, // 逐场景改写
     getConfiguration: () => ({ get: () => undefined }),
     onDidChangeWorkspaceFolders: () => D,
+    openTextDocument: async (uri) => ({ uri }),
     fs: { writeFile: async () => {} },
   },
   Uri: makeStub(''),
@@ -104,11 +138,11 @@ const context = {
   assert.strictEqual(typeof ext.activate, 'function', 'extension.js 未导出 activate');
   ext.activate(context);
 
-  const CMDS = ['generate', 'openReport', 'openOutput', 'openSettings', 'cancelTask', 'dismissTask', 'cancelAll', 'dismissAll'];
+  const CMDS = ['generate', 'openReport', 'openOutput', 'openQuality', 'openSettings', 'cancelTask', 'dismissTask', 'cancelAll', 'dismissAll'];
   for (const c of CMDS) assert.ok(reg.commands[`codeInterviewPrep.${c}`], `命令未注册: ${c}`);
   assert.strictEqual(reg.outputChannels.length, 1, '输出通道未创建');
   assert.ok(reg.trees['codeInterviewPrep.panel'], '树视图未注册');
-  console.log('✓ [1] activate 成功:8 条命令 + 输出通道 + 树视图全部注册');
+  console.log('✓ [1] activate 成功:9 条命令 + 输出通道 + 树视图全部注册');
 
   // 0.4.0 取消/移除命令:无任务时空参调用必须安全不抛
   await reg.commands['codeInterviewPrep.cancelTask']();
@@ -119,9 +153,9 @@ const context = {
   console.log('✓ [1b] cancelTask/dismissTask 空参安全;cancelAll 无任务提示正确');
 
   const children = await reg.trees['codeInterviewPrep.panel'].getChildren();
-  assert.strictEqual(children.length, 4, '树视图应有 4 个条目');
+  assert.strictEqual(children.length, 5, '树视图应有 5 个条目');
   assert.ok(children.every((c) => c.command && c.iconPath));
-  console.log('✓ [2] 树视图 4 条目(生成/报告/产物/设置)带命令与图标');
+  console.log('✓ [2] 树视图 5 条目(生成/报告/质量/产物/设置)带命令与图标');
 
   // 无工作区 → generate 应报"请先打开文件夹"
   vscode.workspace.workspaceFolders = undefined;

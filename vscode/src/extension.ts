@@ -4,6 +4,8 @@ import * as path from 'path';
 import { runPipeline, StageEvent } from '../../src/core/runner';
 import { loadConfig, AppConfig } from '../../src/core/config';
 import { setLogger } from '../../src/core/logger';
+import { RunMode, estimatedCalls, modeLabel } from '../../src/core/policy';
+import { latestRunDir } from '../../src/core/runs';
 
 /**
  * 「Code2Offer(代码转面试)」VSCode 扩展薄壳。
@@ -14,6 +16,10 @@ import { setLogger } from '../../src/core/logger';
  * - 运行中任务条目上内联 ✕ 取消(保留缓存),完成任务条目 ✕ 仅从列表移除;标题栏可全部取消
  * - 1s ticker 实时刷新用时显示,无任务时自动停
  * 0.3.0 既有保障:配置一次一解析、可取消管线、统一输出通道、运行锁、Webview nonce CSP。
+ * 0.5.2 输出分离(用户要求:前一次与后一次不堆在一起):
+ * - 每次生成自动开启一个新输出通道「代码转面试 · 仓库名 · 启动时刻」并自动弹出;
+ *   主通道保留全部运行的完整历史,任务 🗑 移除时连同其专属通道一起清掉
+ * - 默认每次生成落入独立产物目录 runs/run-NNNN(增量缓存/断点自动接续,产物互不覆盖)
  */
 
 const LAST_OUTDIR_KEY = 'codeInterviewPrep.lastOutDir';
@@ -42,18 +48,26 @@ interface StageNode {
   note?: string;
 }
 interface LiveTask {
-  key: string; // outDir(同仓库去重键)
+  key: string; // 输出根(同仓库去重键):显式目录或默认 <仓库>/interview-output
   repoName: string;
   repoPath: string;
   hasJd: boolean;
   jdPath?: string;
   model: string;
+  mode: RunMode;
+  maxFiles: number;
+  outRoot: string; // 去重/锁定用的输出根
+  explicitOutDir?: string; // 用户指定的固定目录(fixed/custom);自动独立目录模式为 undefined
+  outDir: string; // 本次实际产物目录;自动模式在管线启动时分配,完成后回填
+  channel: vscode.LogOutputChannel; // 本次运行专属输出通道(前一次/后一次不堆在一起)
   startedAt: number;
   abort: AbortController;
   stages: Map<string, StageNode>;
   currentLabel: string;
   lastMsg: string;
+  usage: { totalCalls: number; promptTokens: number; completionTokens: number; retries: number; truncations: number };
   finishedAt?: number;
+  needsReview?: boolean;
   error?: string;
   cancelled?: boolean;
   promise: Promise<void>;
@@ -82,7 +96,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(channel);
   setLogger(
     (line) => channel.appendLine(line),
-    (line) => channel.appendLine(`[警告] ${line}`)
+    (line) => channel.appendLine(/^\s*\[警告\]/.test(line) ? line : `[警告] ${line}`)
   );
 
   const treeChanged = new vscode.EventEmitter<void>();
@@ -148,8 +162,13 @@ export function activate(context: vscode.ExtensionContext): void {
     fireSoon();
   };
 
-  const spawnTask = (repoPath: string, jdPath: string | undefined, config: AppConfig): LiveTask => {
-    const key = path.join(repoPath, 'interview-output');
+  const spawnTask = (repoPath: string, jdPath: string | undefined, config: AppConfig, mode: RunMode, maxFiles: number, explicitOutDir?: string): LiveTask => {
+    const outRoot = path.resolve(explicitOutDir ?? path.join(repoPath, 'interview-output'));
+    const key = outRoot;
+    // 每次生成一个独立输出通道(0.5.2,用户要求:前一次与后一次的输出不堆在同一个控制台)。
+    // 通道名 = 代码转面试 · 仓库名 · 启动时刻;开始时自动弹出该通道;主通道保留完整历史。
+    const taskChannel = vscode.window.createOutputChannel(`代码转面试 · ${path.basename(repoPath)} · ${new Date().toLocaleTimeString()}`, { log: true });
+    context.subscriptions.push(taskChannel);
     const abort = new AbortController();
     let settle!: () => void;
     const promise = new Promise<void>((r) => (settle = r));
@@ -160,11 +179,18 @@ export function activate(context: vscode.ExtensionContext): void {
       hasJd: Boolean(jdPath),
       jdPath,
       model: config.model,
+      mode,
+      maxFiles,
+      outRoot,
+      explicitOutDir,
+      outDir: outRoot, // 自动独立目录模式:管线启动时分配 runs/run-NNNN,完成后回填
+      channel: taskChannel,
       startedAt: Date.now(),
       abort,
       stages: new Map(),
       currentLabel: '准备中',
       lastMsg: '',
+      usage: { totalCalls: 0, promptTokens: 0, completionTokens: 0, retries: 0, truncations: 0 },
       promise,
       settle,
     };
@@ -172,12 +198,16 @@ export function activate(context: vscode.ExtensionContext): void {
     ensureTicker();
     fire();
 
-    channel.appendLine(`\n===== 开始生成:${repoPath}(${new Date(task.startedAt).toLocaleString()}) =====`);
-    channel.show(true);
+    const banner = (l: string): void => {
+      channel.appendLine(l); // 主通道:保留全部运行的完整历史
+      taskChannel.appendLine(l); // 本次运行专属通道
+    };
+    banner(`\n===== 开始生成:${repoPath}(${new Date(task.startedAt).toLocaleString()}) =====`);
+    taskChannel.show(true); // 自动开启新的输出端口:输出面板直接切到本次专属通道
 
     (async () => {
       try {
-        const { outDir } = await vscode.window.withProgress(
+        const result = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
             title: `代码转面试 · ${task.repoName}`,
@@ -185,7 +215,7 @@ export function activate(context: vscode.ExtensionContext): void {
           },
           async (progress, token) => {
             token.onCancellationRequested(() => {
-              channel.appendLine('[取消] 收到取消请求,正在中止(当前请求完成后停止)…');
+              banner('[取消] 收到取消请求,正在立即中止当前请求;已完成阶段缓存保留。');
               abort.abort();
             });
             progress.report({ message: '正在生成(侧栏面板可见阶段时间轴,可随时取消)…' });
@@ -197,24 +227,46 @@ export function activate(context: vscode.ExtensionContext): void {
                 progress.report({ message: m.slice(0, 120) });
                 fireSoon();
               },
+              onUsage: (u) => {
+                task.usage = u;
+                task.lastMsg = `调用 ${u.totalCalls} 次 · 输入 ${u.promptTokens} · 输出 ${u.completionTokens} tok · 重试 ${u.retries}`;
+                fireSoon();
+              },
               onStage: (e) => applyStage(task, e),
               abort: abort.signal,
               host: 'vscode',
               config,
+              mode: task.mode,
+              maxFiles: task.maxFiles,
+              outDir: task.explicitOutDir, // undefined = 自动独立目录(每次生成互不覆盖,增量接续)
+              logSink: {
+                // 本次运行的所有阶段日志 → 专属通道(与全局通道同时收到,互不影响)
+                log: (l) => taskChannel.appendLine(l),
+                warn: (l) => taskChannel.appendLine(/^\s*\[警告\]/.test(l) ? l : `[警告] ${l}`),
+              },
             });
           }
         );
+        task.outDir = result.outDir; // 自动模式下即本次专属 runs/run-NNNN
         task.finishedAt = Date.now();
-        task.currentLabel = '完成';
-        context.globalState.update(LAST_OUTDIR_KEY, outDir);
+        let qualityLabel = '已完成';
+        try {
+          const quality = JSON.parse(fs.readFileSync(path.join(task.outDir, 'quality-report.json'), 'utf8')) as { grade?: string; score?: number; aPlusEligible?: boolean };
+          task.needsReview = !quality.aPlusEligible;
+          qualityLabel = `${quality.grade ?? 'partial'} ${quality.score ?? 0}/100${quality.aPlusEligible ? ' · A+ 门禁通过' : ' · 需复核'}`;
+        } catch { task.needsReview = true; qualityLabel = '部分完成 · 质量报告缺失'; }
+        task.currentLabel = qualityLabel;
+        context.globalState.update(LAST_OUTDIR_KEY, task.outDir);
         context.globalState.update(LAST_RUN_KEY, new Date().toISOString());
         const pick = await vscode.window.showInformationMessage(
-          `${task.repoName}:面试材料生成完成(用时 ${fmtDur(task.finishedAt - task.startedAt)})!`,
+          `${task.repoName}:${qualityLabel}(用时 ${fmtDur(task.finishedAt - task.startedAt)})`,
           '打开报告',
+          '打开质量报告',
           '打开文件夹'
         );
-        if (pick === '打开报告') openReportPanel(context, path.join(outDir, 'index.html'));
-        else if (pick === '打开文件夹') vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(outDir));
+        if (pick === '打开报告') openReportPanel(context, path.join(task.outDir, 'index.html'));
+        else if (pick === '打开质量报告') openQualityReport(task.outDir);
+        else if (pick === '打开文件夹') vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(task.outDir));
       } catch (err) {
         task.finishedAt = Date.now();
         const msg = err instanceof Error ? err.message : String(err);
@@ -228,20 +280,42 @@ export function activate(context: vscode.ExtensionContext): void {
           task.currentLabel = '失败';
           for (const n of task.stages.values()) if (n.status === 'start') n.status = 'error';
           const pick = await vscode.window.showErrorMessage(`生成失败(${task.repoName}):${msg}`, '查看日志');
-          if (pick === '查看日志') channel.show();
+          if (pick === '查看日志') taskChannel.show();
         }
       } finally {
         ensureTicker();
         fire();
         settle();
-        channel.appendLine(`===== ${task.repoName} 结束(用时 ${fmtDur(Date.now() - task.startedAt)}) =====\n`);
+        banner(`===== ${task.repoName} 结束(用时 ${fmtDur(Date.now() - task.startedAt)}) =====\n`);
       }
     })();
     return task;
   };
 
+  async function handleExistingTask(existing: LiveTask, repoPath: string): Promise<void> {
+    const pick = await vscode.window.showWarningMessage(
+      `「${existing.repoName}」的生成任务正在运行(${fmtDur(Date.now() - existing.startedAt)},当前阶段:${existing.currentLabel})。再次点击不会产生第二个任务。`,
+      '查看进度',
+      '取消并重新开始'
+    );
+    if (pick === '查看进度') {
+      await vscode.commands.executeCommand('codeInterviewPrep.panel.focus');
+    } else if (pick === '取消并重新开始') {
+      existing.abort.abort();
+      await existing.promise; // 等它把取消收尾(请求级中止,秒级)
+      tasks.delete(existing.key);
+      try {
+        const cfg = resolveConfig(repoPath);
+        // 自动独立目录模式沿用(重新开始 = 再开一个新 run,已完成的增量照常接续)
+        spawnTask(repoPath, existing.jdPath, cfg, existing.mode, existing.maxFiles, existing.explicitOutDir);
+      } catch (err) {
+        vscode.window.showErrorMessage(`代码转面试:${err instanceof Error ? err.message : err}`);
+      }
+    }
+  }
+
   /** 生成命令主体。reuseJd = 取消并重新开始时代已选过 JD,直接沿用 */
-  async function runGenerateCommand(item?: vscode.Uri, reuseJd?: { jdPath?: string }): Promise<void> {
+  async function runGenerateCommand(item?: vscode.Uri, reuseJd?: { jdPath?: string; mode?: RunMode; maxFiles?: number; outDir?: string }): Promise<void> {
     let folder: vscode.Uri | undefined = item;
     if (!folder) {
       const wss = vscode.workspace.workspaceFolders;
@@ -259,24 +333,64 @@ export function activate(context: vscode.ExtensionContext): void {
     const guessKey = path.join(folder.fsPath, 'interview-output');
     const existing = tasks.get(guessKey);
     if (existing && !existing.finishedAt) {
-      const pick = await vscode.window.showWarningMessage(
-        `「${existing.repoName}」的生成任务正在运行(${fmtDur(Date.now() - existing.startedAt)},当前阶段:${existing.currentLabel})。再次点击不会产生第二个任务。`,
-        '查看进度',
-        '取消并重新开始'
+      await handleExistingTask(existing, folder.fsPath);
+      return;
+    }
+
+    let mode: RunMode = 'balanced';
+    let maxFiles = 40;
+    let explicitOutDir: string | undefined;
+    if (reuseJd?.mode) {
+      mode = reuseJd.mode;
+      maxFiles = reuseJd.maxFiles ?? maxFiles;
+      explicitOutDir = reuseJd.outDir;
+    } else {
+      const modePick = await vscode.window.showQuickPick(
+        [
+          { label: '平衡模式(推荐)', description: '100 题 + 证据校验', value: 'balanced' as RunMode },
+          { label: '经济模式(预览)', description: '约 40 题 + 轻量校验,不代表完整题库', value: 'economy' as RunMode },
+          { label: '深度模式', description: '100 题 + 全量对抗校验 + 严格门禁', value: 'deep' as RunMode },
+        ],
+        { placeHolder: '选择生成模式 · 预计调用和成本会随模式变化' }
       );
-      if (pick === '查看进度') {
-        await vscode.commands.executeCommand('codeInterviewPrep.panel.focus');
-      } else if (pick === '取消并重新开始') {
-        existing.abort.abort();
-        await existing.promise; // 等它把取消收尾(请求级中止,秒级)
-        tasks.delete(existing.key);
-        try {
-          const cfg = resolveConfig(folder.fsPath);
-          spawnTask(folder.fsPath, existing.jdPath, cfg);
-        } catch (err) {
-          vscode.window.showErrorMessage(`代码转面试:${err instanceof Error ? err.message : err}`);
-        }
-      }
+      if (!modePick) return;
+      mode = modePick.value;
+      const estimate = estimatedCalls(mode);
+      const maxFilesText = await vscode.window.showInputBox({
+        prompt: `最大精读文件数 · ${modeLabel(mode)}模式预计 ${estimate.min}~${estimate.max} 次调用`,
+        value: String(maxFiles),
+        validateInput: (v) => /^\d+$/.test(v.trim()) && Number(v) > 0 && Number(v) <= 500 ? undefined : '请输入 1~500 的整数',
+      });
+      if (maxFilesText === undefined) return;
+      maxFiles = Number(maxFilesText);
+      // 输出方式(0.5.2):默认每次生成自动新建独立目录,前后两次产物互不覆盖
+      const outPick = await vscode.window.showQuickPick(
+        [
+          { label: '自动独立目录(推荐)', description: '每次生成新建 runs/run-000N,前后两次互不覆盖;增量缓存自动接续', value: 'auto' },
+          { label: '固定 interview-output', description: '旧模式:所有生成写同一目录,后一次覆盖前一次', value: 'fixed' },
+          { label: '自定义目录…', description: '输入相对仓库的目录名(同样每次固定写该目录)', value: 'custom' },
+        ],
+        { placeHolder: '输出方式 · 前一次与后一次的产物分开存放,还是共用固定目录?' }
+      );
+      if (!outPick) return;
+      if (outPick.value === 'fixed') {
+        explicitOutDir = path.join(folder.fsPath, 'interview-output');
+      } else if (outPick.value === 'custom') {
+        const outText = await vscode.window.showInputBox({
+          prompt: '输出目录(相对于仓库)',
+          value: 'interview-output',
+          validateInput: (v) => v.trim() && path.basename(path.resolve(folder!.fsPath, v.trim())) !== '.cache' ? undefined : '请输入有效目录名',
+        });
+        if (outText === undefined) return;
+        explicitOutDir = path.resolve(folder.fsPath, outText.trim() || 'interview-output');
+      } // auto → undefined,由管线分配 runs/run-NNNN
+      vscode.window.showInformationMessage(`${modeLabel(mode)}模式: ${estimate.note} · 最大精读 ${maxFiles} 文件`, { modal: false });
+    }
+
+    const taskKey = path.resolve(explicitOutDir ?? path.join(folder.fsPath, 'interview-output'));
+    const selectedExisting = tasks.get(taskKey);
+    if (selectedExisting && !selectedExisting.finishedAt) {
+      await handleExistingTask(selectedExisting, folder.fsPath);
       return;
     }
 
@@ -309,7 +423,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (pick) vscode.commands.executeCommand('codeInterviewPrep.openSettings');
       return;
     }
-    spawnTask(folder.fsPath, jdPath, config);
+    spawnTask(folder.fsPath, jdPath, config, mode, maxFiles, explicitOutDir);
   }
 
   const resolveTask = (arg: unknown): LiveTask | undefined => {
@@ -330,7 +444,7 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       t.abort.abort();
-      vscode.window.showInformationMessage(`${t.repoName}:已请求取消,当前模型请求完成后停止;已完成阶段的缓存保留,重跑自动续。`);
+      vscode.window.showInformationMessage(`${t.repoName}:已请求取消,当前模型请求将立即中止;已完成阶段缓存保留,重跑自动续。`);
     }),
 
     // 内联 🗑:从列表移除已完成任务
@@ -342,6 +456,7 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       tasks.delete(t.key);
+      t.channel.dispose(); // 连同本次运行专属的输出通道一起清掉
       fire();
     }),
 
@@ -353,13 +468,14 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       running.forEach((t) => t.abort.abort());
-      vscode.window.showInformationMessage(`已对 ${running.length} 个任务发出取消:当前请求完成后停止,缓存保留。`);
+      vscode.window.showInformationMessage(`已对 ${running.length} 个任务发出取消:当前请求将立即中止,缓存保留。`);
     }),
 
     vscode.commands.registerCommand('codeInterviewPrep.openReport', async () => {
-      const candidates = [lastOutDir()];
+      // 定位顺序:上次生成的目录 → 工作区最近一次完成的 run(runs/run-NNNN)→ 旧布局根目录
       const wss = vscode.workspace.workspaceFolders ?? [];
-      if (wss.length) candidates.push(path.join(wss[0].uri.fsPath, 'interview-output'));
+      const wsRoot = wss.length ? path.join(wss[0].uri.fsPath, 'interview-output') : undefined;
+      const candidates = [lastOutDir(), wsRoot && latestRunDir(wsRoot), wsRoot];
       for (const dir of candidates) {
         if (!dir) continue;
         const html = path.join(dir, 'index.html');
@@ -372,9 +488,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('codeInterviewPrep.openOutput', async () => {
-      const candidates = [lastOutDir()];
       const wss = vscode.workspace.workspaceFolders ?? [];
-      if (wss.length) candidates.push(path.join(wss[0].uri.fsPath, 'interview-output'));
+      const wsRoot = wss.length ? path.join(wss[0].uri.fsPath, 'interview-output') : undefined;
+      const candidates = [lastOutDir(), wsRoot && latestRunDir(wsRoot), wsRoot];
       for (const dir of candidates) {
         if (!dir) continue;
         if (fs.existsSync(dir)) {
@@ -383,6 +499,14 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }
       vscode.window.showErrorMessage('未找到 interview-output 产物文件夹,请先生成');
+    }),
+
+    vscode.commands.registerCommand('codeInterviewPrep.openQuality', async () => {
+      const wss = vscode.workspace.workspaceFolders ?? [];
+      const wsRoot = wss.length ? path.join(wss[0].uri.fsPath, 'interview-output') : undefined;
+      const dir = lastOutDir() ?? (wsRoot && latestRunDir(wsRoot)) ?? wsRoot;
+      if (dir) await openQualityReport(dir);
+      else vscode.window.showErrorMessage('未找到质量报告,请先生成');
     }),
 
     vscode.commands.registerCommand('codeInterviewPrep.openSettings', async () => {
@@ -421,15 +545,23 @@ export function activate(context: vscode.ExtensionContext): void {
       it.description = t.error.slice(0, 80);
       it.contextValue = 'cip-task-finished';
       it.command = { command: 'codeInterviewPrep.generate', title: '重试', arguments: [vscode.Uri.file(t.repoPath)] };
+    } else if (t.needsReview) {
+      it.label = `$(warning) ${t.repoName}(需复核)`;
+      it.description = `部分完成 · ${total} · 打开质量报告查看门禁原因`;
+      it.contextValue = 'cip-task-finished';
+      it.command = { command: 'codeInterviewPrep.openQuality', title: '打开质量报告' };
     } else {
       it.label = `$(check) ${t.repoName}`;
-      it.description = `完成 · ${total} · 点开展开看各节点用时`;
+      it.description = `完成 · ${total} · ${path.basename(t.outDir)} · 点开展开看各节点用时`;
       it.contextValue = 'cip-task-finished';
       it.command = { command: 'codeInterviewPrep.openReport', title: '打开报告' };
     }
     const lines = [
-      `**${t.repoName}** — 模型 ${t.model}${t.hasJd ? ' · 带 JD' : ''}`,
+      `**${t.repoName}** — ${modeLabel(t.mode)}模式 · 模型 ${t.model}${t.hasJd ? ' · 带 JD' : ''}`,
+      `调用 ${t.usage.totalCalls} 次 · 输入 ${t.usage.promptTokens} tok · 输出 ${t.usage.completionTokens} tok · 重试 ${t.usage.retries} · 截断 ${t.usage.truncations}`,
       `仓库:${t.repoPath}`,
+      `产物:${t.outDir}`,
+      `日志通道:${t.channel.name}`,
       `开始:${new Date(t.startedAt).toLocaleString()}`,
       '',
       ...STAGE_ORDER.map((s) => {
@@ -500,7 +632,8 @@ export function activate(context: vscode.ExtensionContext): void {
           anyRunning ? '不同仓库可并行,各自独立取消;同仓库误点不会产生第二个任务' : '对当前工作区仓库运行完整管线(画像→精读→出题→校验→总装)'
         ),
         mk('打开面试报告', 'codeInterviewPrep.openReport', 'book', '在编辑器内打开可搜索的自测报告 index.html'),
-        mk('打开产物文件夹', 'codeInterviewPrep.openOutput', 'folder-opened', '在系统文件管理器中打开 interview-output'),
+        mk('查看质量门禁', 'codeInterviewPrep.openQuality', 'verified', '打开确定性 quality-report.json 与质量门禁报告.md'),
+        mk('打开产物文件夹', 'codeInterviewPrep.openOutput', 'folder-opened', '打开最近一次生成的产物目录(自动独立目录模式下为 runs/run-000N;每次生成互不覆盖)'),
         mk('配置模型 / 密钥说明', 'codeInterviewPrep.openSettings', 'gear', '扩展设置与 .env 配置说明')
       );
       if (!anyRunning && tasks.size) {
@@ -511,11 +644,27 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   context.subscriptions.push(
     vscode.commands.registerCommand('codeInterviewPrep.dismissAll', () => {
-      for (const [k, t] of [...tasks]) if (t.finishedAt) tasks.delete(k);
+      for (const [k, t] of [...tasks]) {
+        if (!t.finishedAt) continue;
+        tasks.delete(k);
+        t.channel.dispose();
+      }
       fire();
     }),
     vscode.window.createTreeView('codeInterviewPrep.panel', { treeDataProvider: provider, showCollapseAll: true })
   );
+}
+
+async function openQualityReport(outDir: string): Promise<void> {
+  const markdown = path.join(outDir, '质量门禁报告.md');
+  const json = path.join(outDir, 'quality-report.json');
+  const target = fs.existsSync(markdown) ? markdown : json;
+  if (!fs.existsSync(target)) {
+    vscode.window.showErrorMessage('未找到质量门禁报告,请先生成');
+    return;
+  }
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+  await vscode.window.showTextDocument(doc, vscode.ViewColumn.One, false);
 }
 
 /**
@@ -524,30 +673,18 @@ export function activate(context: vscode.ExtensionContext): void {
  */
 function openReportPanel(context: vscode.ExtensionContext, htmlPath: string): void {
   let html = fs.readFileSync(htmlPath, 'utf-8');
-  const scriptCount = (html.match(/<script>/g) ?? []).length;
+  const scriptTags = html.match(/<script\b[^>]*>/gi) ?? [];
   const headMatch = html.match(/<head[^>]*>/i);
-  if (scriptCount !== 1 || !headMatch) {
+  if (scriptTags.length !== 1 || !headMatch) {
     vscode.window
-      .showWarningMessage('报告结构非标准(可能被修改过),已改用系统浏览器打开。', '仍要在 VSCode 内打开')
-      .then((pick) => {
-        if (pick === '仍要在 VSCode 内打开') {
-          const panel = vscode.window.createWebviewPanel(
-            'codeInterviewReport',
-            '面试材料报告',
-            vscode.ViewColumn.One,
-            { enableScripts: true }
-          );
-          panel.webview.html = html;
-        } else {
-          vscode.env.openExternal(vscode.Uri.file(htmlPath));
-        }
-      });
+      .showWarningMessage('报告结构非标准(可能被修改过),为保护工作区已改用系统浏览器打开。')
+      .then(() => vscode.env.openExternal(vscode.Uri.file(htmlPath)));
     return;
   }
   const nonce = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
   const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">`;
   html = html.replace(headMatch[0], `${headMatch[0]}${csp}`);
-  html = html.replace('<script>', `<script nonce="${nonce}">`);
+  html = html.replace(scriptTags[0], `<script nonce="${nonce}">`);
   const panel = vscode.window.createWebviewPanel(
     'codeInterviewReport',
     '面试材料报告',

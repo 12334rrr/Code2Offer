@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import * as assert from 'node:assert';
 import {
   parseCiteRanges,
+  normalizeCiteLines,
   isValidComparison,
   coerceQuestion,
   validateQuestion,
@@ -24,6 +25,13 @@ test('parseCiteRanges:非法输入返回 null', () => {
   assert.strictEqual(parseCiteRanges('0-5'), null); // start < 1
   assert.strictEqual(parseCiteRanges('10-3'), null); // end < start
   assert.strictEqual(parseCiteRanges('12-'), null);
+});
+
+test('normalizeCiteLines:数字范围后的中文说明被丢进确定性规范化,散文不猜造', () => {
+  assert.equal(normalizeCiteLines('204-239（实际为核心实现）'), '204-239');
+  assert.equal(normalizeCiteLines('12-18, 25-31（见说明）'), '12-18,25-31');
+  assert.equal(normalizeCiteLines('SERVER_MANAGED 定义及用途'), null);
+  assert.equal(normalizeCiteLines('请查看相关代码'), null);
 });
 
 const goodCmp = {

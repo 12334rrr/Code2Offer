@@ -106,6 +106,19 @@ export function parseCiteRanges(lines: string): Array<[number, number]> | null {
   return out.length ? out : null;
 }
 
+/**
+ * 模型偶尔把解释拼进 lines，例如 "204-239（实际为…）"。
+ * 只接受字符串开头连续的合法数字范围并丢弃后缀；没有数字开头的散文一律返回 null。
+ */
+export function normalizeCiteLines(lines: unknown): string | null {
+  if (typeof lines !== 'string') return null;
+  const match = lines.trim().match(/^(\d+(?:\s*-\s*\d+)?(?:\s*,\s*\d+(?:\s*-\s*\d+)?)*)\b/);
+  if (!match) return null;
+  const ranges = parseCiteRanges(match[1].replace(/\s+/g, ''));
+  if (!ranges) return null;
+  return ranges.map(([start, end]) => (start === end ? String(start) : `${start}-${end}`)).join(',');
+}
+
 /** 运行时校验一道题;返回错误列表(空 = 通过)。files 是仓库真实文件集合。 */
 export function validateQuestion(q: unknown, files: Set<string>): string[] {
   const errors: string[] = [];
@@ -195,7 +208,10 @@ export function coerceQuestion(raw: unknown, id: string, category: string, diffi
     考察点: String(o.考察点 ?? ''),
     答案要点: cleanArr(o.答案要点),
     代码依据: Array.isArray(o.代码依据)
-      ? o.代码依据.map((c: any) => ({ file: String(c?.file ?? ''), lines: String(c?.lines ?? '') }))
+      ? o.代码依据.map((c: any) => ({
+          file: String(c?.file ?? ''),
+          lines: normalizeCiteLines(c?.lines) ?? String(c?.lines ?? ''),
+        }))
       : [],
     追问链: cleanArr(o.追问链).slice(0, 4),
     加分回答: String(o.加分回答 ?? ''),

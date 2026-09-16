@@ -1,6 +1,7 @@
 .claude/
 node_modules/
 dist/
+JD/
 interview-output/
 .interview-cache/
 vscode/node_modules/

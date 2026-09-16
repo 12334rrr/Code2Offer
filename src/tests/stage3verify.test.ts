@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert';
+import * as fs from 'node:fs';
 import { deterministicCheck, sanitizeCitations } from '../stages/stage3Verify';
 import { RepoFacts } from '../core/profiler';
 import { Question } from '../core/schemas';
@@ -20,6 +21,7 @@ const mkFacts = (root: string, files: string[]): RepoFacts => ({
   readingPlan: [],
   notes: [],
   skippedSensitive: [],
+  skippedByReason: {},
 });
 
 const mkQ = (cites: Array<{ file: string; lines: string }>): Question => ({
@@ -90,4 +92,31 @@ test('sanitizeCitations:越界 start 不再产出倒置区间,完全越界删除
   } finally {
     cleanup(dir);
   }
+});
+
+test('runStage3:校验批次有界并发且 checkpoint 合并不丢题', async () => {
+  const dir = makeTempDir('cip-verify-concurrent-');
+  try {
+    write(dir, 'a.ts', 'export const answer = 42;\n');
+    const facts = mkFacts(dir, ['a.ts']);
+    const questions = Array.from({ length: 25 }, (_, i) => ({ ...mkQ([{ file: 'a.ts', lines: '1' }]), id: `Q${String(i + 1).padStart(2, '0')}` }));
+    let active = 0;
+    let peak = 0;
+    const client = {
+      chat: async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
+        return JSON.stringify({ results: questions.map((q) => ({ id: q.id, verdict: 'pass', note: 'evidence' })) });
+      },
+    } as any;
+    const { runStage3 } = await import('../stages/stage3Verify');
+    const result = await runStage3(client, facts, questions, dir);
+    assert.equal(result.total, 25);
+    assert.equal(result.pass, 25);
+    assert.ok(peak <= 3, `并发峰值 ${peak} 超过保守上限`);
+    const checkpoint = JSON.parse(fs.readFileSync(`${dir}/.verify-progress.json`, 'utf8'));
+    assert.equal(checkpoint.length, 25);
+  } finally { cleanup(dir); }
 });

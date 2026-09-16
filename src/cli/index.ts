@@ -10,14 +10,18 @@ import { loadChunks } from '../core/chunker';
 import { topUpToQuota } from '../stages/stage2Questions';
 import { RepoFacts } from '../core/profiler';
 import { ModuleCard, ProjectKnowledge } from '../core/schemas';
+import { RunMode } from '../core/policy';
+import { repoRootOfOutput } from '../core/runs';
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.2';
 
 const USAGE = `代码转面试 ${VERSION} — 读取完整代码仓库,生成真实面试场景全套材料(DeepSeek)
 
 用法:
-  code2offer generate <仓库路径> [--jd <岗位描述.txt>] [--out <输出目录>] [--force] [--max-files <n>]
+  code2offer generate <仓库路径> [--jd <岗位描述.txt>] [--out <固定输出目录>] [--mode economy|balanced|deep] [--force] [--max-files <n>]
       生成全套材料:项目讲解 / 百问百答(含横向对比) / 亮点防守 / 缺点改进 / 设计决策对比 / index.html 报告
+      默认每次生成都新建独立目录 <仓库>/interview-output/runs/run-NNNN:前后两次产物互不覆盖,
+      增量缓存/断点自动从上一次接续(仓库没变的部分零成本);--out 指定固定目录时沿用旧覆盖语义
 
   code2offer rehearse <输出目录> [--count <n>] [--category <类别>] [--top20]
       模拟面试排练:逐题提问 → 你作答 → DeepSeek 评分+追问 → 记录弱项
@@ -35,12 +39,13 @@ const USAGE = `代码转面试 ${VERSION} — 读取完整代码仓库,生成真
 
 示例:
   node dist/cli/index.js generate ./my-repo --jd jd.txt
-  node dist/cli/index.js rehearse ./my-repo/interview-output --count 5 --top20
-  node dist/cli/index.js evaluate ./my-repo/interview-output
+      # 产物落在 ./my-repo/interview-output/runs/run-0001/(下次自动 run-0002,互不覆盖)
+  node dist/cli/index.js rehearse ./my-repo/interview-output/runs/run-0001 --count 5 --top20
+  node dist/cli/index.js evaluate ./my-repo/interview-output/runs/run-0001
 `;
 
 /** 值旗标(消耗下一个参数);其余 --xxx 一律按布尔处理 */
-const VALUE_FLAGS = new Set(['jd', 'out', 'max-files', 'count', 'category']);
+const VALUE_FLAGS = new Set(['jd', 'out', 'mode', 'max-files', 'count', 'category']);
 
 export interface ParsedArgs {
   flags: Record<string, string | boolean>;
@@ -87,6 +92,13 @@ function requireNumber(flags: Record<string, string | boolean>, name: string): n
   return Math.round(n);
 }
 
+function requireMode(flags: Record<string, string | boolean>): RunMode | undefined {
+  const value = flags.mode;
+  if (value === undefined) return undefined;
+  if (value === 'economy' || value === 'balanced' || value === 'deep') return value;
+  throw new Error(`--mode 只能是 economy/balanced/deep,得到:${String(value)}`);
+}
+
 async function main(): Promise<void> {
   const [, , command, ...rest] = process.argv;
 
@@ -113,6 +125,7 @@ async function main(): Promise<void> {
         outDir: typeof flags.out === 'string' ? flags.out : undefined,
         force: flags.force === true,
         maxFiles: requireNumber(flags, 'max-files'),
+        mode: requireMode(flags),
         host: 'cli',
       });
       break;
@@ -122,7 +135,7 @@ async function main(): Promise<void> {
         console.error(USAGE);
         process.exit(1);
       }
-      const cfg = loadConfig({ trustedDirs: [process.cwd(), toolRootDir()], repoDir: path.dirname(path.resolve(positional)) });
+      const cfg = loadConfig({ trustedDirs: [process.cwd(), toolRootDir()], repoDir: repoRootOfOutput(path.resolve(positional)) });
       const client = new DeepSeekClient(cfg);
       await runRehearsal({
         outDir: path.resolve(positional),
@@ -150,7 +163,7 @@ async function main(): Promise<void> {
       const cards = readJson<ModuleCard[]>(path.join(outDir, 'module_cards.json'), '模块卡');
       const knowledge = readJson<ProjectKnowledge>(path.join(outDir, 'knowledge.json'), '知识卡');
       const { chunks } = loadChunks(facts.root, facts.readingPlan);
-      const cfg = loadConfig({ trustedDirs: [process.cwd(), toolRootDir()], repoDir: path.dirname(outDir) });
+      const cfg = loadConfig({ trustedDirs: [process.cwd(), toolRootDir()], repoDir: repoRootOfOutput(outDir) });
       const client = new DeepSeekClient(cfg);
       await topUpToQuota(client, facts, cards, knowledge, chunks, outDir);
       client.printUsage();

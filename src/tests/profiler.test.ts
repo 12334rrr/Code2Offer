@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert';
-import { compileGitignorePattern, isIgnoredPath, profileRepo, IgnoreRule } from '../core/profiler';
+import { compileGitignorePattern, isIgnoredPath, profileRepo, snapshotRepo, IgnoreRule } from '../core/profiler';
 import { makeTempDir, write, cleanup } from './helpers';
 
 const rule = (pattern: string, base = ''): IgnoreRule | null => {
@@ -95,4 +95,78 @@ test('profileRepo:gitignore 规则生效(根目录)', () => {
   } finally {
     cleanup(dir);
   }
+});
+
+test('snapshotRepo:新增/删除/重命名会让画像门控失效,不读取文件内容', () => {
+  const dir = makeTempDir('cip-snapshot-');
+  try {
+    write(dir, 'src/a.ts', 'export const a = 1;\n');
+    const before = snapshotRepo(dir).hash;
+    write(dir, 'src/new.ts', 'export const n = 2;\n');
+    const after = snapshotRepo(dir).hash;
+    assert.notEqual(after, before);
+    assert.ok(snapshotRepo(dir).entries >= 3, '快照应包含目录与文件元数据');
+  } finally { cleanup(dir); }
+});
+
+test('profileRepo:100-300KB 文本也必须经过分段密钥扫描', () => {
+  const dir = makeTempDir('cip-large-secret-');
+  try {
+    const secret = 'sk-' + 'A'.repeat(24);
+    // 放在 64KB 读取边界附近,覆盖分段扫描的跨块拼接场景。
+    const filler = 'x'.repeat(65_530);
+    write(dir, 'renamed-source.ts', `${filler}${secret}\n${'// filler\n'.repeat(16_000)}`);
+    write(dir, 'normal.ts', 'export const safe = true;\n');
+    const facts = profileRepo(dir, 10);
+    assert.ok(!facts.files.includes('renamed-source.ts'));
+    assert.ok(facts.skippedSensitive.includes('renamed-source.ts'));
+    assert.equal(facts.skippedByReason['内容命中密钥特征'], 1);
+  } finally { cleanup(dir); }
+});
+
+test('profileRepo:浏览器 profile/构建产物过滤,但不粗暴忽略有效 _devtools 脚本', () => {
+  const dir = makeTempDir('cip-noise-');
+  try {
+    write(dir, 'edge_profile2/Default/Extensions/noise.js', 'const thirdPartyBundle = true;\n');
+    write(dir, '_build_dist/generated.js', 'const generated = true;\n');
+    write(dir, '_build_tmp/generated.json', '{"generated":true}\n');
+    write(dir, '_devtools/bak_round2/old.js', 'const old = true;\n');
+    write(dir, '_devtools/browsertest/npmcache/blob', 'cache\n');
+    write(dir, 'old.js.bak_20260916', 'const old = true;\n');
+    write(dir, 'scratch.tmp', 'temporary\n');
+    write(dir, '_devtools/edge_profile_notes.ts', 'export const useful = true;\n');
+    const facts = profileRepo(dir, 20);
+    assert.ok(!facts.files.some((f) => f.startsWith('edge_profile2/')));
+    assert.ok(!facts.files.some((f) => f.startsWith('_build_dist/')));
+    assert.ok(!facts.files.some((f) => f.startsWith('_build_tmp/')));
+    assert.ok(!facts.files.some((f) => f.startsWith('_devtools/bak_round2/')));
+    assert.ok(!facts.files.some((f) => f.startsWith('_devtools/browsertest/npmcache/')));
+    assert.ok(!facts.files.includes('old.js.bak_20260916'));
+    assert.ok(!facts.files.includes('scratch.tmp'));
+    assert.ok(facts.files.includes('_devtools/edge_profile_notes.ts'));
+    assert.ok(facts.skippedByReason['浏览器用户目录/缓存'] >= 1);
+    assert.ok(facts.skippedByReason['构建产物或工具缓存'] >= 1);
+  } finally { cleanup(dir); }
+});
+
+test('profileRepo:多语言画像、manifest、路由和数据表线索', () => {
+  const dir = makeTempDir('cip-languages-');
+  try {
+    write(dir, 'pubspec.yaml', 'name: demo\ndependencies:\n  flutter:\n  dio: ^5.0.0\n');
+    write(dir, 'lib/main.dart', 'void main() {}\n');
+    write(dir, 'src/main.rs', '#[get("/health")]\nfn health() {}\n');
+    write(dir, 'routes/web.php', "Route::get('/users', fn () => 'ok');\nprotected $table = 'users';\n");
+    write(dir, 'schema.prisma', 'model User {\n  id Int @id\n}\n');
+    write(dir, 'Dockerfile', 'FROM node:22\n');
+    const facts = profileRepo(dir, 20);
+    assert.equal(facts.overview.languageNames?.Dart.files, 1);
+    assert.equal(facts.overview.languageNames?.Rust.files, 1);
+    assert.equal(facts.overview.languageNames?.PHP.files, 1);
+    assert.equal(facts.overview.languageNames?.Dockerfile.files, 1);
+    assert.ok(facts.overview.manifests.some((m) => m.kind === 'dart'));
+    assert.ok(facts.routes.some((r) => r.method === 'GET' && r.route === '/users'));
+    assert.ok(facts.routes.some((r) => r.method === 'GET' && r.route === '/health'));
+    assert.ok(facts.dbTables.some((t) => t.table === 'users'));
+    assert.ok(facts.dbTables.some((t) => t.table === 'User'));
+  } finally { cleanup(dir); }
 });

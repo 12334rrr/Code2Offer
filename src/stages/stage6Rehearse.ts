@@ -5,6 +5,7 @@ import { DeepSeekClient, parseJsonLoose } from '../core/deepseek';
 import { Question } from '../core/schemas';
 import { STAGE6_SCORE_SYSTEM, stage6ScoreUser } from '../core/prompts';
 import { log, warn } from '../core/logger';
+import { RunMode } from '../core/policy';
 
 export interface RehearseOptions {
   outDir: string;
@@ -12,6 +13,7 @@ export interface RehearseOptions {
   count?: number;
   category?: string;
   top20?: boolean;
+  mode?: RunMode;
 }
 
 interface RehearsalState {
@@ -105,7 +107,7 @@ export async function runRehearsal(opts: RehearseOptions): Promise<void> {
           { role: 'system', content: STAGE6_SCORE_SYSTEM },
           { role: 'user', content: stage6ScoreUser(q, answer) },
         ],
-        { temperature: 0.1, jsonMode: true, maxTokens: 2000 }
+        { requestType: 'stage6-rehearse', temperature: 0.1, jsonMode: true, maxTokens: 2000, hardMaxTokens: 3500, mode: opts.mode }
       );
       const r = parseJsonLoose<{
         score: number;

@@ -4,6 +4,7 @@ import { Chunk, renderChunks } from '../core/chunker';
 import { ModuleCard, ProjectKnowledge } from '../core/schemas';
 import { DiskCache, PROMPT_VERSION } from '../core/cache';
 import { log, warn } from '../core/logger';
+import { RunMode } from '../core/policy';
 import {
   STAGE1_MODULE_SYSTEM,
   STAGE1_SYNTHESIS_SYSTEM,
@@ -21,9 +22,7 @@ export interface Stage1Output {
 /** 阶段 1 并发度:模块卡相互独立,并发 3 显著缩短总时长(推理模型单次分钟级) */
 const MODULE_CONCURRENCY = 3;
 
-const MAX_MODULES = 12;
-
-/** 按顶层目录分组为模块;(根目录) 单独一组。返回被上限裁掉的分组,交由调用方记录 */
+/** 按顶层目录分组为模块;(根目录) 单独一组。所有模块都保留，避免第 13 个模块静默消失。 */
 export function groupByModule(chunks: Chunk[]): { modules: Array<{ name: string; chunks: Chunk[] }>; dropped: string[] } {
   const map = new Map<string, Chunk[]>();
   for (const c of chunks) {
@@ -38,13 +37,13 @@ export function groupByModule(chunks: Chunk[]): { modules: Array<{ name: string;
       const size = (x: typeof a) => x.chunks.reduce((s, c) => s + c.endLine - c.startLine, 0);
       return size(b) - size(a);
     });
-  return { modules: sorted.slice(0, MAX_MODULES), dropped: sorted.slice(MAX_MODULES).map((m) => m.name) };
+  return { modules: sorted, dropped: [] };
 }
 
 function overviewDigest(facts: RepoFacts): string {
-  const langs = Object.entries(facts.overview.languages)
+  const langs = Object.entries(facts.overview.languageNames ?? facts.overview.languages)
     .sort((a, b) => b[1].loc - a[1].loc)
-    .map(([ext, v]) => `${ext}:${v.files}个文件/${v.loc}行`)
+    .map(([language, v]) => `${language}:${v.files}个文件/${v.loc}行`)
     .join(', ');
   return JSON.stringify(
     {
@@ -157,6 +156,7 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: nu
 export interface StageRunContext {
   /** 用户取消信号:阶段间与请求间检查 */
   signal?: AbortSignal;
+  mode?: RunMode;
 }
 
 export async function runStage1(
@@ -169,47 +169,69 @@ export async function runStage1(
   const overviewJson = overviewDigest(facts);
   const { modules, dropped } = groupByModule(chunks);
   log(`  模块分组:${modules.map((m) => `${m.name}(${m.chunks.length}块)`).join('、')}`);
-  if (dropped.length) {
-    warn(`  [注意] 模块数超过 ${MAX_MODULES},以下分组未精读(可提高 --max-files):${dropped.join('、')}`);
-  }
+  if (dropped.length) warn(`  [注意] 以下分组未精读:${dropped.join('、')}`);
 
   const cards = await mapLimit(modules, MODULE_CONCURRENCY, async (mod) => {
-    const chunkText = renderChunks(mod.chunks);
-    const files = [...new Set(mod.chunks.map((c) => c.file))];
-    // 缓存键含 overviewJson(prompt 的组成部分):改未精读文件使画像变化后,旧模块卡不再错误命中
-    const key = cache.key('stage1', PROMPT_VERSION, mod.name, overviewJson, chunkText);
-    const cached = cache.get<ModuleCard>(key);
-    if (cached && !isEmptyCard(cached)) {
-      log(`  [缓存] 模块 ${mod.name}`);
-      return cached;
+    // A large module is split into local evidence cards. Each card is independently
+    // cached and a single failed slice cannot erase the rest of the module.
+    const groups: Chunk[][] = [];
+    let group: Chunk[] = [];
+    let chars = 0;
+    for (const chunk of mod.chunks) {
+      const size = chunk.content.length + 300;
+      if (group.length && chars + size > 24_000) { groups.push(group); group = []; chars = 0; }
+      group.push(chunk);
+      chars += size;
     }
-    log(`  精读模块:${mod.name} ...`);
-    const call = (temperature: number) =>
-      client.chat(
-        [
-          { role: 'system', content: STAGE1_MODULE_SYSTEM },
-          { role: 'user', content: stage1ModuleUser(mod.name, overviewJson, chunkText) },
-        ],
-        { temperature, jsonMode: true, maxTokens: 8000, signal: ctx.signal }
-      );
-    let card: ModuleCard | null = null;
-    for (let attempt = 0; attempt < 2 && !card; attempt++) {
-      try {
-        const parsed = coerceCard(parseJsonLoose(await call(attempt === 0 ? 0.2 : 0.3)), mod.name, files);
-        // 空卡视同解析失败:重试;仍失败走兜底。绝不入缓存(防 {} 永久投毒,审计 Q-R1)
-        if (!isEmptyCard(parsed)) card = parsed;
-      } catch (err) {
-        if (String(err instanceof Error ? err.message : err) === '已取消') throw err;
-        warn(`  [警告] 模块 ${mod.name} 第 ${attempt + 1} 次解析失败:${err instanceof Error ? err.message : err}`);
+    if (group.length) groups.push(group);
+    log(`  精读模块:${mod.name} (${groups.length} 个局部证据卡) ...`);
+    const partials: ModuleCard[] = [];
+    for (let i = 0; i < groups.length; i++) {
+      const localChunks = groups[i];
+      const chunkText = renderChunks(localChunks);
+      const files = [...new Set(localChunks.map((c) => c.file))];
+      const key = cache.key('stage1-local', PROMPT_VERSION, mod.name, String(i), overviewJson, chunkText);
+      const cached = cache.get<ModuleCard>(key);
+      if (cached && !isEmptyCard(cached)) { partials.push(cached); continue; }
+      let card: ModuleCard | null = null;
+      for (let attempt = 0; attempt < 2 && !card; attempt++) {
+        try {
+          const raw = await client.chat(
+            [
+              { role: 'system', content: STAGE1_MODULE_SYSTEM },
+              { role: 'user', content: stage1ModuleUser(`${mod.name}/证据卡${i + 1}`, overviewJson, chunkText) },
+            ],
+            { requestType: 'stage1-module', temperature: attempt ? 0.2 : 0.1, jsonMode: true, maxTokens: 6500, hardMaxTokens: 12000, signal: ctx.signal, mode: ctx.mode }
+          );
+          const parsed = coerceCard(parseJsonLoose(raw), mod.name, files);
+          if (!isEmptyCard(parsed)) card = parsed;
+        } catch (err) {
+          if (String(err instanceof Error ? err.message : err) === '已取消') throw err;
+          warn(`  [警告] 模块 ${mod.name} 局部卡 ${i + 1} 第 ${attempt + 1} 次失败:${err instanceof Error ? err.message : err}`);
+        }
       }
+      if (card) { cache.set(key, card); partials.push(card); }
+      else warn(`  [警告] 模块 ${mod.name} 局部卡 ${i + 1} 失败,保留确定性源码证据`);
     }
-    if (!card) {
-      warn(`  [警告] 模块 ${mod.name} 两次解析失败/返回空卡,使用兜底卡(不缓存)`);
-      card = coerceCard({}, mod.name, files);
-    } else {
-      cache.set(key, card);
+    if (!partials.length) {
+      const files = [...new Set(mod.chunks.map((c) => c.file))];
+      return coerceCard({
+        职责: `局部证据卡解析失败；仅保留 ${files.length} 个文件的源码范围，未生成未经证据支持的结论。`,
+        关键实现: mod.chunks.map((c) => ({ file: c.file, lines: `${c.startLine}-${c.endLine}`, name: '源码证据片段', 说明: '模型解析失败，保留原始证据范围供后续人工核对。' })),
+        缺点: ['模型局部解析失败，需要人工复核。'],
+      }, mod.name, files);
     }
-    return card;
+    const merged = coerceCard({
+      name: mod.name,
+      files: [...new Set(mod.chunks.map((c) => c.file))],
+      职责: partials.map((p) => p.职责).filter(Boolean).join('；'),
+      关键实现: partials.flatMap((p) => p.关键实现),
+      设计决策: partials.flatMap((p) => p.设计决策),
+      亮点: [...new Set(partials.flatMap((p) => p.亮点))],
+      缺点: [...new Set(partials.flatMap((p) => p.缺点))],
+      面试深挖点: [...new Set(partials.flatMap((p) => p.面试深挖点))],
+    }, mod.name, [...new Set(mod.chunks.map((c) => c.file))]);
+    return merged;
   });
 
   // 项目级汇总
@@ -226,7 +248,7 @@ export async function runStage1(
           { role: 'system', content: STAGE1_SYNTHESIS_SYSTEM },
           { role: 'user', content: stage1SynthesisUser(cardsJson, overviewJson) },
         ],
-        { temperature, jsonMode: true, maxTokens: 8000, signal: ctx.signal }
+        { requestType: 'stage1-synthesis', temperature, jsonMode: true, maxTokens: 5500, hardMaxTokens: 10000, signal: ctx.signal, mode: ctx.mode }
       );
     let parsed: ProjectKnowledge | null = null;
     try {

@@ -1,6 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { execFileSync } from 'child_process';
+import { isSourceLikePath, languageStatsFor, LanguageStat } from './languages';
 
 /**
  * 阶段 0:确定性仓库画像(无 LLM)。
@@ -27,6 +29,8 @@ export interface RepoFacts {
     totalFiles: number;
     totalLOC: number;
     languages: Record<string, { files: number; loc: number }>;
+    /** 归一化后的语言分布;保留 languages(扩展名分布) 兼容旧缓存与调用方。 */
+    languageNames?: Record<string, LanguageStat>;
     manifests: Array<Record<string, unknown>>;
     entryPoints: string[];
   };
@@ -42,19 +46,18 @@ export interface RepoFacts {
   notes: string[];
   /** 因敏感规则被跳过的文件(透明化,便于用户核对没有误伤) */
   skippedSensitive: string[];
+  /** 所有未进入画像/精读的路径按原因计数,避免"跳过"不可解释。 */
+  skippedByReason: Record<string, number>;
+  /** 只由路径、大小、mtime 组成的便宜仓库快照,不含文件内容。 */
+  snapshotHash?: string;
 }
 
 const IGNORE_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', 'out', '.next', 'nuxt', '.nuxt',
   '__pycache__', '.venv', 'venv', 'env', 'target', 'vendor', 'coverage',
   '.idea', '.vscode', '.gradle', 'bin', 'obj', '.cache', 'bower_components',
-  'interview-output', '.interview-cache',
-]);
-
-const SOURCE_EXTS = new Set([
-  '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.py', '.go', '.java', '.kt',
-  '.kts', '.rs', '.c', '.h', '.cpp', '.hpp', '.cs', '.rb', '.php', '.swift',
-  '.m', '.scala', '.vue', '.svelte', '.sql', '.sh',
+  'interview-output', '.interview-cache', '_build_dist', 'build_dist', '_build_tmp',
+  '_build', '.build', '.parcel-cache', 'npmcache', 'npm-cache', '.npm', '.pnpm-store',
 ]);
 
 const BINARY_EXTS = new Set([
@@ -84,9 +87,65 @@ const SENSITIVE_FILE_RE = [
 
 /** 内容级密钥特征(命中即跳过该文件,防"改名的密钥文件") */
 const SECRET_CONTENT_RE =
-  /(BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|xox[bp]-[A-Za-z0-9-]{10,})/;
+  /(BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY|sk-[A-Za-z0-9][A-Za-z0-9_-]{19,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|xox[bp]-[A-Za-z0-9-]{10,})/;
 
-const SECRET_SCAN_MAX_BYTES = 100_000;
+const SECRET_SCAN_MAX_BYTES = 64 * 1024;
+
+/** 内容级扫描对外暴露给 chunk 阶段复检；只返回布尔值，不泄露命中原文。 */
+export function containsHighRiskSecret(content: string): boolean {
+  return SECRET_CONTENT_RE.test(content);
+}
+
+function scanFileForSecrets(absPath: string, size: number): boolean {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(absPath, 'r');
+    const buffer = Buffer.allocUnsafe(SECRET_SCAN_MAX_BYTES);
+    let position = 0;
+    let carry = '';
+    while (position < size) {
+      const read = fs.readSync(fd, buffer, 0, Math.min(buffer.length, size - position), position);
+      if (!read) break;
+      const text = carry + buffer.subarray(0, read).toString('utf8');
+      if (containsHighRiskSecret(text)) return true;
+      // All current high-risk tokens are far shorter than this overlap; this also
+      // catches a token split across two UTF-8 read boundaries.
+      carry = text.slice(-512);
+      position += read;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
+
+function incReason(reasons: Record<string, number>, reason: string): void {
+  reasons[reason] = (reasons[reason] ?? 0) + 1;
+}
+
+function isIgnoredDirName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return [...IGNORE_DIRS].some((x) => x.toLowerCase() === lower) ||
+    /^(?:edge|chrome|chromium|browser)_profile\d*$/i.test(name) ||
+    /^(?:bak|backup)(?:[_-].*|\d+)?$/i.test(name);
+}
+
+function isBrowserProfilePath(rel: string): boolean {
+  return rel.split('/').some((part) => /^(?:edge|chrome|chromium|browser)_profile\d*$/i.test(part));
+}
+
+function isBackupOrTempFile(rel: string): boolean {
+  const name = path.basename(rel);
+  return /(?:\.bak(?:[_-].*)?|\.old|\.orig|\.tmp|\.temp|~)$/i.test(name) || name === '.DS_Store';
+}
+
+function isCompressedBundle(rel: string, size: number): boolean {
+  return size >= 32_000 && /(?:\.min|\.bundle|\.chunk)[.-]?(?:js|mjs|cjs|css)$/i.test(rel);
+}
 
 /* ---------------- .gitignore(层叠规则,修复 C-B/M12) ---------------- */
 
@@ -201,7 +260,7 @@ function buildIgnoreRules(root: string, notes: string[]): { rules: IgnoreRule[] 
     }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
-      if (IGNORE_DIRS.has(e.name)) continue;
+      if (isIgnoredDirName(e.name)) continue;
       const rel = base ? `${base}/${e.name}` : e.name;
       // 被忽略的目录不再下钻(其内部 .gitignore 也不该生效)
       if (isIgnoredPath(rel, all)) continue;
@@ -240,13 +299,54 @@ interface WalkResult {
   /** rel → 文件内容(供各检测器复用;超大/可疑文件不存) */
   contents: Map<string, string>;
   skippedSensitive: string[];
+  skippedByReason: Record<string, number>;
   notes: string[];
+}
+
+export interface RepoSnapshot {
+  hash: string;
+  entries: number;
+}
+
+/**
+ * 便宜的门控快照：只遍历目录并读取 stat，不读取文件内容。
+ * 它覆盖新增、删除、重命名以及等长修改(大小/mtime)，并且不会把敏感内容写入状态文件。
+ */
+export function snapshotRepo(root: string): RepoSnapshot {
+  const notes: string[] = [];
+  const { rules } = buildIgnoreRules(root, notes);
+  const entries: string[] = [];
+  const stack: Array<{ abs: string; base: string }> = [{ abs: root, base: '' }];
+  while (stack.length) {
+    const { abs, base } = stack.pop()!;
+    let dirents: fs.Dirent[];
+    try { dirents = fs.readdirSync(abs, { withFileTypes: true }); } catch { continue; }
+    for (const entry of dirents) {
+      const rel = base ? `${base}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (isIgnoredDirName(entry.name) || isIgnoredPath(rel, rules)) continue;
+        stack.push({ abs: path.join(abs, entry.name), base: rel });
+        entries.push(`${rel}/`);
+      } else if (entry.isFile()) {
+        if (isIgnoredPath(rel, rules)) continue;
+        try {
+          const st = fs.statSync(path.join(abs, entry.name));
+          entries.push(`${rel}|${st.size}|${Math.trunc(st.mtimeMs)}`);
+        } catch {
+          entries.push(`${rel}|ERR`);
+        }
+      }
+    }
+  }
+  entries.sort();
+  return { hash: crypto.createHash('sha1').update(entries.join('\n')).digest('hex'), entries: entries.length };
 }
 
 function walkAndRead(root: string, notes: string[]): WalkResult {
   const files: string[] = [];
   const contents = new Map<string, string>();
   const skippedSensitive: string[] = [];
+  const skippedByReason: Record<string, number> = {};
   const { rules } = buildIgnoreRules(root, notes);
   const stack: Array<{ abs: string; base: string }> = [{ abs: root, base: '' }];
 
@@ -262,16 +362,22 @@ function walkAndRead(root: string, notes: string[]): WalkResult {
       const absChild = path.join(abs, e.name);
       const rel = base ? `${base}/${e.name}` : e.name;
       if (e.isDirectory()) {
-        if (IGNORE_DIRS.has(e.name)) continue;
+        if (isIgnoredDirName(e.name)) {
+          incReason(skippedByReason, isBrowserProfilePath(rel) || /profile/i.test(e.name) ? '浏览器用户目录/缓存' : '构建产物或工具缓存');
+          continue;
+        }
         if (isIgnoredPath(rel, rules)) continue;
         stack.push({ abs: absChild, base: rel });
       } else if (e.isFile()) {
         const ext = path.extname(e.name).toLowerCase();
-        if (BINARY_EXTS.has(ext)) continue;
-        if (isIgnoredPath(rel, rules)) continue;
+        if (BINARY_EXTS.has(ext)) { incReason(skippedByReason, '二进制文件'); continue; }
+        if (isIgnoredPath(rel, rules)) { incReason(skippedByReason, 'gitignore'); continue; }
+        if (isBrowserProfilePath(rel)) { incReason(skippedByReason, '浏览器用户目录/缓存'); continue; }
+        if (isBackupOrTempFile(rel)) { incReason(skippedByReason, '备份/临时产物'); continue; }
         // 敏感拒绝清单:独立生效,不吃 gitignore 的亏
         if (isSensitiveFile(rel)) {
           skippedSensitive.push(rel);
+          incReason(skippedByReason, '敏感路径');
           continue;
         }
         let size = 0;
@@ -282,16 +388,19 @@ function walkAndRead(root: string, notes: string[]): WalkResult {
         }
         if (size > MAX_FILE_BYTES) {
           notes.push(`${rel} 超过 ${MAX_FILE_BYTES} 字节,跳过内容分析`);
+          incReason(skippedByReason, '超过大小上限');
           continue;
         }
-        files.push(rel);
+        if (isCompressedBundle(rel, size)) { incReason(skippedByReason, '压缩/第三方 bundle'); continue; }
         try {
-          const content = fs.readFileSync(absChild, 'utf-8');
-          if (content.length <= SECRET_SCAN_MAX_BYTES && SECRET_CONTENT_RE.test(content)) {
+          // 100–300KB 文件也要完整扫描；分段检测后才允许把内容放入模型候选集合。
+          if (scanFileForSecrets(absChild, size)) {
             skippedSensitive.push(rel);
-            files.pop();
+            incReason(skippedByReason, '内容命中密钥特征');
             continue;
           }
+          files.push(rel);
+          const content = fs.readFileSync(absChild, 'utf-8');
           contents.set(rel, content);
         } catch {
           contents.set(rel, '');
@@ -299,7 +408,7 @@ function walkAndRead(root: string, notes: string[]): WalkResult {
       }
     }
   }
-  return { files: files.sort(), contents, skippedSensitive, notes };
+  return { files: files.sort(), contents, skippedSensitive, skippedByReason, notes };
 }
 
 /* ---------------- 各语言 manifest 解析(best-effort) ---------------- */
@@ -340,6 +449,39 @@ function parseManifests(root: string, files: string[], contents: Map<string, str
       const sec = read(f).split('[dependencies]')[1]?.split('[')[0] ?? '';
       const deps = [...sec.matchAll(/^\s*([a-zA-Z0-9_-]+)\s*=/gm)].map((m) => m[1]);
       out.push({ file: f, kind: 'rust', dependencies: deps });
+    } else if (base === 'composer.json') {
+      try {
+        const j = JSON.parse(read(f)) as Record<string, any>;
+        out.push({
+          file: f,
+          kind: 'php-composer',
+          name: j.name,
+          dependencies: Object.keys(j.require ?? {}),
+          devDependencies: Object.keys(j['require-dev'] ?? {}),
+        });
+      } catch {
+        /* 坏 JSON 跳过 */
+      }
+    } else if (base === 'pubspec.yaml') {
+      const deps = [...read(f).matchAll(/^\s{2}([a-zA-Z0-9_-]+):/gm)].map((m) => m[1]);
+      out.push({ file: f, kind: 'dart', dependencies: [...new Set(deps)].slice(0, 80) });
+    } else if (base === 'gemfile') {
+      const deps = [...read(f).matchAll(/^\s*gem\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]);
+      out.push({ file: f, kind: 'ruby-bundler', dependencies: deps });
+    } else if (base === 'mix.exs') {
+      const deps = [...read(f).matchAll(/\{\s*:([a-zA-Z0-9_]+)\s*,/g)].map((m) => m[1]);
+      out.push({ file: f, kind: 'elixir-mix', dependencies: [...new Set(deps)] });
+    } else if (base === 'build.gradle' || base === 'build.gradle.kts') {
+      const deps = [...read(f).matchAll(/\b(?:implementation|api|compileOnly|testImplementation)\s*[( ]\s*['"]([^'"]+)['"]/g)].map((m) => m[1]);
+      out.push({ file: f, kind: 'gradle', dependencies: [...new Set(deps)].slice(0, 80) });
+    } else if (base === 'package.swift') {
+      const deps = [...read(f).matchAll(/\.package\s*\(\s*url:\s*["']([^"']+)["']/g)].map((m) => m[1]);
+      out.push({ file: f, kind: 'swift-spm', dependencies: deps });
+    } else if (/\.(?:csproj|fsproj|vbproj)$/i.test(base)) {
+      const deps = [...read(f).matchAll(/<PackageReference\s+Include="([^"]+)"/gi)].map((m) => m[1]);
+      out.push({ file: f, kind: 'dotnet', dependencies: deps });
+    } else if (base === 'project.clj' || base === 'deps.edn') {
+      out.push({ file: f, kind: 'clojure', dependencies: [...read(f).matchAll(/([a-zA-Z0-9_.-]+)\s*\{/g)].map((m) => m[1]).slice(0, 80) });
     }
   }
   return out;
@@ -364,23 +506,27 @@ function detectEntryPoints(files: string[], contents: Map<string, string>): stri
       if (typeof j.bin === 'string') resolveEntry(j.bin);
       const start = j.scripts?.start;
       if (typeof start === 'string') {
-        const m2 = start.match(/([\w./-]+\.(?:js|ts|mjs))/);
+        const m2 = start.match(/([\w./-]+\.(?:js|ts|mjs|cjs|jsx|tsx|py|go|rs|java|kt|dart|rb|php|swift|cs|fs|ex|exs))/i);
         if (m2) resolveEntry(m2[1]);
       }
     } catch {
       /* 忽略 */
     }
   }
-  const entryName = /^(main|index|app|server|cli|wsgi|asgi|manage|application)\.[a-zA-Z]+$/i;
+  const entryName = /^(main|index|app|server|cli|wsgi|asgi|manage|application|program|lib|router)\.[a-zA-Z]+$/i;
   for (const f of files) {
     const base = path.basename(f);
-    if (entryName.test(base) || /(^|\/)(src|app|cmd)\/main\.[a-zA-Z]+$/i.test(f)) found.add(f);
+    if (
+      entryName.test(base) ||
+      /(^|\/)(src|app|cmd)(?:\/[^/]+)?\/main\.[a-zA-Z]+$/i.test(f) ||
+      /(^|\/)(bin|scripts)\/(?:[\w.-]+)\.[a-zA-Z]+$/i.test(f)
+    ) found.add(f);
   }
   const known = new Set(files);
   return [...found].filter((f) => known.has(f.replace(/\\/g, '/'))).slice(0, 15);
 }
 
-const ROUTE_PATTERNS: Array<{ re: RegExp; methodIdx: number; pathIdx: number }> = [
+const ROUTE_PATTERNS: Array<{ re: RegExp; methodIdx?: number; pathIdx: number; extensions?: readonly string[] }> = [
   // Express / Koa:限定常见路由接收者,避免 cache.get('key') 这类误报
   { re: /\b(?:app|router|server|api|route|r|v\d+)\s*\.\s*(get|post|put|delete|patch)\(\s*['"`]([^'"`\s]+)['"`]/g, methodIdx: 1, pathIdx: 2 },
   // FastAPI / Flask(APIRouter):@app.get('/x'
@@ -391,25 +537,42 @@ const ROUTE_PATTERNS: Array<{ re: RegExp; methodIdx: number; pathIdx: number }> 
   { re: /@(Get|Post|Put|Delete|Request)Mapping\(\s*(?:value\s*=\s*)?["']([^"']+)["']/g, methodIdx: 1, pathIdx: 2 },
   // Gin / Echo:r.GET("/x"
   { re: /\.\s*(GET|POST|PUT|DELETE|PATCH)\(\s*"([^"\s]+)"/g, methodIdx: 1, pathIdx: 2 },
+  // NestJS:@Get('/x') / Fastify decorators
+  { re: /@(Get|Post|Put|Delete|Patch)\(\s*['"]([^'"]+)['"]/g, methodIdx: 1, pathIdx: 2, extensions: ['.js', '.jsx', '.ts', '.tsx'] },
+  // Laravel:Route::get('/x', ...)
+  { re: /\bRoute::(get|post|put|delete|patch)\(\s*['"]([^'"]+)['"]/gi, methodIdx: 1, pathIdx: 2, extensions: ['.php'] },
+  // Rails / Phoenix: get "/x", ...
+  { re: /\b(get|post|put|delete|patch)\s+['"]([^'"]+)['"]/gi, methodIdx: 1, pathIdx: 2, extensions: ['.rb', '.ex', '.exs'] },
+  // Django:path('/x', view) / re_path(r'/x', view)
+  { re: /\b(?:path|re_path)\(\s*[rR]?['"]([^'"]+)['"]/g, pathIdx: 1, extensions: ['.py'] },
+  // ASP.NET:[HttpGet("/x")]
+  { re: /\[(HttpGet|HttpPost|HttpPut|HttpDelete|HttpPatch)(?:\(\s*["']([^"']+)["']\s*\))?\]/gi, methodIdx: 1, pathIdx: 2, extensions: ['.cs'] },
+  // Actix / Rocket:#[get("/x")]
+  { re: /#\[(get|post|put|delete|patch)\(\s*["']([^"']+)["']/gi, methodIdx: 1, pathIdx: 2, extensions: ['.rs'] },
+  // Phoenix router:get "/x" without a controller call is covered above; this
+  // pattern also captures framework-neutral router.route('/x') declarations.
+  { re: /\b(?:app|router|route)\.route\(\s*['"]([^'"]+)['"]/g, pathIdx: 1 },
 ];
 
 function detectRoutes(files: string[], contents: Map<string, string>): Array<{ file: string; method: string; route: string }> {
   const out: Array<{ file: string; method: string; route: string }> = [];
   for (const f of files) {
     const ext = path.extname(f).toLowerCase();
-    if (!['.js', '.ts', '.py', '.java', '.go', '.kt'].includes(ext)) continue;
+    if (!['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.py', '.java', '.go', '.kt', '.kts', '.cs', '.rs', '.rb', '.php', '.ex', '.exs'].includes(ext)) continue;
     const content = contents.get(f);
     if (!content) continue;
     for (const p of ROUTE_PATTERNS) {
+      if (p.extensions && !p.extensions.includes(ext)) continue;
       p.re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = p.re.exec(content)) !== null) {
-        let method = String(m[p.methodIdx] ?? '').toUpperCase();
-        method = method.replace(/MAPPING|ROUTE/g, '');
-        if (method === 'REQUEST' || method === '' || !method) method = m[p.methodIdx] ? 'ANY' : String(m[2] ?? 'ANY');
+        let method = p.methodIdx === undefined ? 'ANY' : String(m[p.methodIdx] ?? '').toUpperCase();
+        const explicitMethod = method.match(/\b(GET|POST|PUT|DELETE|PATCH|ANY)\b/)?.[1];
+        method = explicitMethod ?? method.replace(/MAPPING|ROUTE/g, '');
+        if (method === 'REQUEST' || method === '' || !method) method = 'ANY';
         if (!/^(GET|POST|PUT|DELETE|PATCH|ANY)$/.test(method)) continue;
         const line = content.slice(0, m.index).split(/\r?\n/).length;
-        out.push({ file: `${f}:${line}`, method, route: m[p.pathIdx] });
+        out.push({ file: `${f}:${line}`, method, route: String(m[p.pathIdx] ?? '/') });
         if (out.length > 200) return out;
       }
     }
@@ -424,15 +587,23 @@ function detectDbTables(files: string[], contents: Map<string, string>): Array<{
   };
   for (const f of files) {
     const ext = path.extname(f).toLowerCase();
-    if (!['.sql', '.js', '.ts', '.py', '.java', '.go', '.rb', '.php'].includes(ext)) continue;
+    if (!['.sql', '.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.go', '.rb', '.php', '.kt', '.kts', '.cs', '.rs', '.swift', '.dart', '.scala', '.ex', '.exs', '.prisma', '.sol'].includes(ext)) continue;
     const content = contents.get(f);
     if (!content) continue;
     for (const m of content.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"']?([A-Za-z_]\w*)[`"']?/gi)) {
       push(f, m[1]);
     }
     for (const m of content.matchAll(/__tablename__\s*=\s*['"](\w+)['"]/g)) push(f, m[1]);
-    for (const m of content.matchAll(/@(?:Entity|Table)\s*(?:\([\s\S]{0,120}?name\s*=\s*["'](\w+)["'])?/g)) {
+    for (const m of content.matchAll(/@(?:Entity|Table)\s*(?:\(\s*(?:name\s*=\s*)?["']?([A-Za-z_]\w*)["']?)/g)) {
       if (m[1]) push(f, m[1]);
+    }
+    for (const m of content.matchAll(/\bdb_table\s*=\s*["']([A-Za-z_]\w*)["']/g)) push(f, m[1]);
+    for (const m of content.matchAll(/\b(?:schema|from)\s*["']([A-Za-z_]\w*)["']/g)) {
+      if (ext === '.ex' || ext === '.exs') push(f, m[1]);
+    }
+    for (const m of content.matchAll(/\b(?:protected\s+)?\$table\s*=\s*["']([A-Za-z_]\w*)["']/g)) push(f, m[1]);
+    for (const m of content.matchAll(/^\s*model\s+([A-Za-z_]\w*)\s*\{/gm)) {
+      if (ext === '.prisma') push(f, m[1]);
     }
     if (out.length > 80) break;
   }
@@ -508,7 +679,7 @@ function findInteresting(files: string[], contents: Map<string, string>, notes: 
   const out: InterestingFile[] = [];
   for (const f of files) {
     const ext = path.extname(f).toLowerCase();
-    if (!SOURCE_EXTS.has(ext) || ext === '.sql') continue;
+    if (!isSourceLikePath(f) || ext === '.sql') continue;
     const content = contents.get(f);
     if (!content) continue;
     const reasons: string[] = [];
@@ -596,7 +767,7 @@ export function selectReadingFiles(facts: RepoFacts, cap = 40): string[] {
   facts.configFiles.slice(0, 5).forEach((f) => add(f, 5));
   // 大文件补位(可能藏着主逻辑)
   for (const f of facts.files) {
-    if (!SOURCE_EXTS.has(path.extname(f).toLowerCase())) continue;
+    if (!isSourceLikePath(f)) continue;
     add(f, 1);
   }
   const known = new Set(facts.files);
@@ -611,17 +782,18 @@ export function selectReadingFiles(facts: RepoFacts, cap = 40): string[] {
 
 export function profileRepo(root: string, maxFiles = 40): RepoFacts {
   const notes: string[] = [];
-  const { files, contents, skippedSensitive } = walkAndRead(root, notes);
-  if (!files.length) throw new Error(`在 ${root} 未找到任何可分析文件`);
-  if (skippedSensitive.length) {
-    notes.push(`已按敏感文件规则跳过 ${skippedSensitive.length} 个文件(不会发给模型):${skippedSensitive.slice(0, 8).join('、')}${skippedSensitive.length > 8 ? ' …' : ''}`);
+  const walked = walkAndRead(root, notes);
+  if (!walked.files.length) throw new Error(`在 ${root} 未找到任何可分析文件`);
+  if (walked.skippedSensitive.length) {
+    notes.push(`已按敏感文件规则跳过 ${walked.skippedSensitive.length} 个文件(不会发给模型):${walked.skippedSensitive.slice(0, 8).join('、')}${walked.skippedSensitive.length > 8 ? ' …' : ''}`);
   }
 
   const languages: Record<string, { files: number; loc: number }> = {};
+  const languageNames = languageStatsFor(walked.files, walked.contents, countLOC);
   let totalLOC = 0;
-  for (const f of files) {
+  for (const f of walked.files) {
     const ext = path.extname(f).toLowerCase() || '(无扩展名)';
-    const loc = countLOC(contents.get(f) ?? '');
+    const loc = countLOC(walked.contents.get(f) ?? '');
     const slot = (languages[ext] ??= { files: 0, loc: 0 });
     slot.files++;
     slot.loc += loc;
@@ -631,24 +803,27 @@ export function profileRepo(root: string, maxFiles = 40): RepoFacts {
   const facts: RepoFacts = {
     root,
     generatedAt: new Date().toISOString(),
-    files,
+    files: walked.files,
     overview: {
-      totalFiles: files.length,
+      totalFiles: walked.files.length,
       totalLOC,
       languages,
-      manifests: parseManifests(root, files, contents),
-      entryPoints: detectEntryPoints(files, contents),
+      languageNames,
+      manifests: parseManifests(root, walked.files, walked.contents),
+      entryPoints: detectEntryPoints(walked.files, walked.contents),
     },
-    routes: detectRoutes(files, contents),
-    dbTables: detectDbTables(files, contents),
-    configFiles: detectConfigFiles(files, skippedSensitive),
-    hotspots: gitHotspots(root, files, notes),
-    interestingFiles: findInteresting(files, contents, notes),
-    testEvidence: extractTestEvidence(files, contents),
-    tree: buildTree(files),
+    routes: detectRoutes(walked.files, walked.contents),
+    dbTables: detectDbTables(walked.files, walked.contents),
+    configFiles: detectConfigFiles(walked.files, walked.skippedSensitive),
+    hotspots: gitHotspots(root, walked.files, notes),
+    interestingFiles: findInteresting(walked.files, walked.contents, notes),
+    testEvidence: extractTestEvidence(walked.files, walked.contents),
+    tree: buildTree(walked.files),
     readingPlan: [],
     notes,
-    skippedSensitive,
+    skippedSensitive: walked.skippedSensitive,
+    skippedByReason: walked.skippedByReason,
+    snapshotHash: snapshotRepo(root).hash,
   };
   facts.readingPlan = selectReadingFiles(facts, maxFiles);
   return facts;

@@ -15,6 +15,7 @@ import { renderHtml } from '../report/htmlReport';
 import { JdAnalysis } from './stage4JD';
 import { StageRunContext } from './stage1Read';
 import { log } from '../core/logger';
+import { buildQualityReport } from '../core/quality';
 
 /** Markdown 表格单元格清洗:| 会拆列、换行会断行(LLM 输出里 a || b、O(n|V|) 很常见) */
 export function sanitizeMdCell(s: unknown): string {
@@ -71,7 +72,8 @@ async function generateMarkdown(
   system: string,
   material: string,
   maxTokens = 8000,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  mode?: StageRunContext['mode']
 ): Promise<string> {
   // 键包含 system 全文:提示词任何改动立即失效旧缓存(length 相同的微调也会失效)
   const key = cache.key(cacheNs, PROMPT_VERSION, system, material);
@@ -85,7 +87,7 @@ async function generateMarkdown(
       { role: 'system', content: system },
       { role: 'user', content: material },
     ],
-    { temperature: 0.4, maxTokens, signal }
+    { requestType: 'stage5-narrative', temperature: 0.4, maxTokens, hardMaxTokens: 10000, signal, mode }
   );
   cache.set(key, raw);
   return raw;
@@ -134,6 +136,7 @@ export interface Stage5Stats {
   pass: number;
   fix: number;
   flag: number;
+  unverified: number;
 }
 
 export async function runStage5(
@@ -153,10 +156,10 @@ export async function runStage5(
   // 四份叙述稿互不依赖,并行生成(推理模型单次分钟级,串行使总装时长 ×4)
   log('  并行生成《项目讲解》《亮点与防守》《缺点与改进》《设计决策与选型对比》...');
   const [narrative, highlights, weaknesses, decisions] = await Promise.all([
-    generateMarkdown(client, cache, '05a-narrative', STAGE5_NARRATIVE_SYSTEM, material, 8000, ctx.signal),
-    generateMarkdown(client, cache, '05b-highlights', STAGE5_HIGHLIGHTS_SYSTEM, material, 8000, ctx.signal),
-    generateMarkdown(client, cache, '05c-weakness', STAGE5_WEAKNESS_SYSTEM, material, 8000, ctx.signal),
-    generateMarkdown(client, cache, '05d-decisions', STAGE5_DECISIONS_SYSTEM, material, 8000, ctx.signal),
+    generateMarkdown(client, cache, '05a-narrative', STAGE5_NARRATIVE_SYSTEM, material, 6000, ctx.signal, ctx.mode),
+    generateMarkdown(client, cache, '05b-highlights', STAGE5_HIGHLIGHTS_SYSTEM, material, 6000, ctx.signal, ctx.mode),
+    generateMarkdown(client, cache, '05c-weakness', STAGE5_WEAKNESS_SYSTEM, material, 6000, ctx.signal, ctx.mode),
+    generateMarkdown(client, cache, '05d-decisions', STAGE5_DECISIONS_SYSTEM, material, 6000, ctx.signal, ctx.mode),
   ]);
   log('  四份叙述稿生成完毕');
 
@@ -168,9 +171,9 @@ export async function runStage5(
     '## 附:仓库事实速览(阶段 0 确定性产出)',
     '',
     `- 文件数 ${facts.overview.totalFiles} | 总行数 ${facts.overview.totalLOC}`,
-    `- 语言分布:${Object.entries(facts.overview.languages)
+    `- 语言分布:${Object.entries(facts.overview.languageNames ?? facts.overview.languages)
       .sort((a, b) => b[1].loc - a[1].loc)
-      .map(([ext, v]) => `${ext}(${v.loc}行)`)
+      .map(([language, v]) => `${language}(${v.loc}行)`)
       .join('、')}`,
     facts.routes.length ? `- 检测到路由 ${facts.routes.length} 条,如:${facts.routes.slice(0, 8).map((r) => `${r.method} ${r.route}`).join('、')}` : '',
     facts.dbTables.length ? `- 数据表:${facts.dbTables.map((t) => t.table).join('、')}` : '',
@@ -235,13 +238,16 @@ export async function runStage5(
   const pass = questions.filter((q) => q.verified === 'pass').length;
   const fix = questions.filter((q) => q.verified === 'fix').length;
   const flag = questions.filter((q) => q.verified === 'flag').length;
+  const unverified = questions.filter((q) => q.verified === 'unverified').length;
+  const quality = buildQualityReport(facts, cards, questions).report;
   const html = renderHtml({
     knowledge,
     questions,
     jd: jd
       ? { 开场白STAR: jd.开场白STAR, 必考ID: jd.必考ID, 复述侧重: jd.复述侧重, 关键词: jd.关键词 }
       : undefined,
-    stats: { pass, fix, flag },
+    stats: { pass, fix, flag, unverified },
+    quality,
     model: client.model,
     generatedAt: new Date().toISOString(),
     // localStorage 命名空间:不同仓库的掌握状态不再互相串扰

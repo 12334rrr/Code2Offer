@@ -50,9 +50,25 @@ test('renderHtml:localStorage 键按仓库隔离', () => {
     generatedAt: 't',
     repoKey: 'abc123',
   });
-  assert.ok(html.includes('cip-progress-abc123'));
+  assert.match(html, /cip-progress-v2-abc123-[a-f0-9]{12}/);
   const html2 = renderHtml({ knowledge, questions: [mkQ()], stats: { pass: 0, fix: 0, flag: 0 }, model: 'm', generatedAt: 't' });
   assert.ok(!html2.includes('cip-progress-abc123'));
+});
+
+test('renderHtml:状态组合筛选/主题/学习进度与题库版本隔离均为本地事件委托', () => {
+  const html = renderHtml({
+    knowledge,
+    questions: [mkQ({ verified: 'flag' })],
+    stats: { pass: 0, fix: 0, flag: 1, unverified: 0 },
+    quality: { grade: 'B', score: 82, aPlusEligible: false },
+    model: 'm', generatedAt: 't', repoKey: 'repo',
+  });
+  assert.ok(html.includes('只练未掌握'));
+  assert.ok(html.includes('只看标红/未覆盖'));
+  assert.ok(html.includes('themeBtn') && html.includes('exportBtn'));
+  assert.ok(html.includes('quality'));
+  assert.match(html, /questionVersion/);
+  assert.ok(!/<(?:button|input|select)[^>]+\bon(?:click|input|change)\s*=/i.test(html));
 });
 
 test('renderHtml:unverified 题显示未覆盖徽标', () => {

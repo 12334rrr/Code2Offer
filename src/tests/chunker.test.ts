@@ -45,15 +45,16 @@ test('loadChunks:按字符预算切块且每块不超限', () => {
   }
 });
 
-test('loadChunks:超长单行被硬截断,不再打爆单块预算', () => {
+test('loadChunks:超长单行拆分保留,不静默丢失代码', () => {
   const dir = makeTempDir();
   try {
     write(dir, 'longline.js', 'const x = "' + 'y'.repeat(200000) + '";\nconsole.log(x);\n');
-    const { chunks } = loadChunks(dir, ['longline.js'], 14000, 3);
-    assert.strictEqual(chunks.length, 1);
-    assert.ok(chunks[0].content.length < 6000, `内容 ${chunks[0].content.length} 应被截断`);
-    assert.ok(chunks[0].content.includes('超长行已截断'));
-    assert.strictEqual(chunks[0].endLine, 2);
+    const { chunks, truncated } = loadChunks(dir, ['longline.js'], 14000);
+    assert.ok(chunks.length > 1, '超长行应拆成多个块');
+    assert.deepStrictEqual(truncated, [], '默认块数上限足够时不应标记截断');
+    const joined = chunks.map((c) => c.content).join('');
+    assert.strictEqual((joined.match(/y/g) ?? []).length, 200000);
+    assert.ok(joined.includes('console.log(x);'));
   } finally {
     cleanup(dir);
   }

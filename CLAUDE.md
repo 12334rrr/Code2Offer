@@ -16,13 +16,13 @@
 
 ```bash
 npm run build                                # npx tsc -p .(先于一切运行)
-node dist/cli/index.js generate <仓库> [--jd jd.txt]   # 全管线
-node dist/cli/index.js evaluate <输出目录>    # DeepSeek 评委自评
-node dist/cli/index.js rehearse <输出目录> --count 5   # 交互排练
+node dist/cli/index.js generate <仓库> [--jd jd.txt] [--out <固定目录>]   # 全管线;默认每次自动独立目录 runs/run-NNNN(增量接续),--out 走旧固定目录语义
+node dist/cli/index.js evaluate <run目录>     # DeepSeek 评委自评
+node dist/cli/index.js rehearse <run目录> --count 5    # 交互排练
 node dist/cli/index.js export-prompts        # 导出全部提示词存档 → docs/prompts/(17 份,含修复环/排练/评委)
-npm test                                     # 构建 + 46 个单元/行为测试(node --test)
+npm test                                     # 构建 + 78 个单元/行为测试(node --test)
 
-# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.4.0)
+# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.5.2)
 cd vscode && npm run typecheck && node esbuild.js && npx @vscode/vsce package --no-dependencies
 code --install-extension vscode/code-interview-prep-<版本>.vsix
 
@@ -46,14 +46,15 @@ node audit/activation-smoke.cjs   # 9 项断言;含"包内文件 == 本地构建
 - 六阶段管线(`src/core/runner.ts` 编排,`state.json` 输入哈希门控,未变化阶段直接跳过):
   0 画像(无 LLM,确定性)→ 1 精读(模块并发 3)→ 2 覆盖矩阵出题(恰好 100 题,补题按配额缺口定向)→ 2.5 对比块补齐 / 2.6 要点实质化 / 2.7 引用消毒 → 3 对抗校验(pass/fix/flag/**unverified**)→ **3.5 标红题重写**(校验报告随后重算)→ 4 JD 加权(可选,形状校验防毒缓存)→ 5 总装(四份文档并行)。
 - **门控哈希基于内容**(0.3.0 起):画像 = 文件清单+精读文件内容哈希;精读 = overview+chunks 全文哈希;校验 = 题目全文+分块+提示词+模型。等长改码、重出题、改答案都会正确失效。
-- **运行锁**:同一输出目录同时只允许一条管线(进程内 Map + `.run-lock` 锁文件,PID+时间戳,45 分钟过期)。
+- **运行锁**:同一输出根同时只允许一条管线(进程内 Map + `.run-lock` 锁文件,PID+时间戳,45 分钟过期;0.5.2 起锁在输出根,自动独立目录模式下同一仓库同样只有一条)。
 - **取消**:`RunOptions.abort` 贯穿全部阶段与每个模型请求;扩展把 VSCode CancellationToken 接到它上面。
-- **阶段事件(0.4.0)**:`RunOptions.onStage` 发结构化事件(profile/read/questions/verify/rewrite/jd/assemble/done × start/done/cached/skip + 用时)。扩展面板据此渲染时间轴:`tasks` Map 支持**多仓库并行任务**,同仓库按 outDir 去重(误点弹「查看进度/取消并重新开始」),条目内联 ✕ 取消/🗑 移除,1s ticker 刷进行中秒表。CLI 不用 onStage,行为不变。
+- **输出分离(0.5.2)**:默认每次生成自动新建 `<仓库>/interview-output/runs/run-NNNN` 独立目录(src/core/runs.ts:allocateRunDir/carryForwardIncrement/latestRunDir/repoRootOfOutput)——上一次的 state.json/画像/模块卡/题库/JD/校验断点/.cache 自动携带接续(最终产物与 .run-lock **绝不携带**);显式 `--out` 走旧覆盖语义。日志层 `withLogSink()`(AsyncLocalStorage)把一次运行的整棵异步调用树日志同时路由到「专属 sink + 全局 sink」——扩展据此每次生成自动创建并弹出独立输出通道「代码转面试 · 仓库 · 时刻」,主通道保留完整历史,任务 🗑 时连同通道 dispose;rehearse/evaluate/topup 的仓库根从 run-manifest 反推(repoRootOfOutput)。
+- **阶段事件(0.4.0)**:`RunOptions.onStage` 发结构化事件(profile/read/questions/verify/rewrite/jd/assemble/done × start/done/cached/skip + 用时)。扩展面板据此渲染时间轴:`tasks` Map 支持**多仓库并行任务**,同仓库按输出根去重(误点弹「查看进度/取消并重新开始」),条目内联 ✕ 取消/🗑 移除,1s ticker 刷进行中秒表。CLI 不用 onStage,行为不变。
 - **统一日志**:`src/core/logger.ts`——所有阶段用 `log()/warn()`,扩展注入 LogOutputChannel;不要在 stages 里直接 console.log。
 - **缓存键包含 system 提示词全文**(`stage5Assemble.ts` / `stage2Questions.ts`):改提示词任何一字,对应产物缓存立即失效、定向重生成;`PROMPT_VERSION` 现为 '2'(0.3.0 行为变更已整体失效旧缓存)。
 - 横向对比是一级硬要求:`isValidComparison` 严格版(矩形表/非空单元格),不合格块剥除后由 2.5 环补齐。
 - 引用语义:行数 = `splitFileLines`(去尾空行),边界 `1 ≤ start ≤ end ≤ total`;校验断点带输入指纹,题库重生成自动作废。
-- **测试**:`npm test`(build 后跑 `node --test dist/tests/`,46 个用例,覆盖 config 优先级/端点绑定、gitignore 语义、敏感清单、引用边界、配额缺口、CLI 旗标、HTML 无内联事件等)。修复行为先在 tests 里加断言。
+- **测试**:`npm test`(build 后跑 `node --test "dist/tests/*.test.js"`,78 个用例,覆盖 config 优先级/端点绑定、gitignore 语义、敏感清单、引用边界、配额缺口、CLI 旗标、HTML 无内联事件、runs 目录分配/增量携带、logger 上下文隔离等)。修复行为先在 tests 里加断言。
 
 ## 已知事实与坑
 

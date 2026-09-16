@@ -6,3 +6,8 @@ tsconfig.json
 node_modules/**
 *.vsix
 package-lock.json
+**/.env*
+**/interview-output/**
+**/audit/**
+**/JD/**
+**/*.log

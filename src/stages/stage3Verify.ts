@@ -3,12 +3,14 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { DeepSeekClient, parseJsonLoose } from '../core/deepseek';
 import { RepoFacts, splitFileLines } from '../core/profiler';
-import { CodeCite, Question, VerificationResult, parseCiteRanges } from '../core/schemas';
+import { CodeCite, Question, VerificationResult, normalizeCiteLines, parseCiteRanges } from '../core/schemas';
 import { STAGE3_VERIFY_SYSTEM, stage3VerifyUser } from '../core/prompts';
 import { StageRunContext } from './stage1Read';
 import { log, warn } from '../core/logger';
 
-const VERIFY_BATCH = 5;
+const MAX_VERIFY_BATCH = 10;
+const VERIFY_BATCH_CHARS = 28_000;
+const VERIFY_CONCURRENCY = 3;
 const MAX_EXCERPT_LINES = 120;
 const MAX_EXCERPT_CHARS = 12000;
 
@@ -97,6 +99,35 @@ ${ex.slice(0, MAX_EXCERPT_CHARS)}`;
     .join('\n\n================================\n\n');
 }
 
+function packVerifyBatches(questions: Question[], excerpts: Map<string, string>): Question[][] {
+  const batches: Question[][] = [];
+  let current: Question[] = [];
+  let chars = 0;
+  for (const q of questions) {
+    const size = buildVerifyItems([q], excerpts).length;
+    if (current.length && (chars + size > VERIFY_BATCH_CHARS || current.length >= MAX_VERIFY_BATCH)) {
+      batches.push(current);
+      current = [];
+      chars = 0;
+    }
+    current.push(q);
+    chars += size;
+  }
+  if (current.length) batches.push(current);
+  return batches;
+}
+
+async function mapLimit<T>(items: T[], limit: number, fn: (item: T, index: number) => Promise<void>): Promise<void> {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      await fn(items[index], index);
+    }
+  }));
+}
+
 export interface VerifyStats {
   total: number;
   pass: number;
@@ -139,6 +170,11 @@ export function sanitizeCitations(facts: RepoFacts, questions: Question[]): numb
         warn(`  [引用消毒] ${q.id}:文件无法读取,删除引用 ${c.file}`);
         fixed++;
         continue;
+      }
+      const normalized = normalizeCiteLines(c.lines);
+      if (normalized && normalized !== c.lines) {
+        c.lines = normalized;
+        fixed++;
       }
       const ranges = parseCiteRanges(c.lines);
       if (!ranges) {
@@ -250,7 +286,9 @@ export async function runStage3(
         if (!r || typeof r.id !== 'string') continue;
         if (!VERDICTS.has(r.verdict)) continue; // 非法裁决的旧记录直接丢弃
         if (!hashOf.has(r.id)) continue; // 不属于当前题库的 ID(幻觉/旧题库)丢弃
-        if ((r as CheckpointEntry).inputHash && (r as CheckpointEntry).inputHash !== hashOf.get(r.id)) continue; // 题目已变化
+        // Old checkpoints without an input fingerprint are not safe to reuse:
+        // question IDs are stable across runs while their evidence can change.
+        if ((r as CheckpointEntry).inputHash !== hashOf.get(r.id)) continue; // 题目或摘录已变化
         results.set(r.id, r);
       }
       if (results.size) log(`  [断点续验] 已有 ${results.size} 题校验结果(输入指纹一致)`);
@@ -263,40 +301,49 @@ export async function runStage3(
       ...r,
       inputHash: hashOf.get(id),
     }));
+    const tmp = `${checkpointPath}.${process.pid}.${Date.now()}.tmp`;
     try {
-      fs.writeFileSync(checkpointPath, JSON.stringify(entries, null, 1), 'utf-8');
+      fs.writeFileSync(tmp, JSON.stringify(entries, null, 1), 'utf-8');
+      // Windows cannot replace an existing file with renameSync. The serialized
+      // writer below prevents lost updates; the temp file prevents partial JSON.
+      if (fs.existsSync(checkpointPath)) fs.unlinkSync(checkpointPath);
+      fs.renameSync(tmp, checkpointPath);
     } catch {
-      /* checkpoint 写失败不阻断校验 */
+      try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* ignore */ }
     }
   };
 
   const idSet = new Set(questions.map((q) => q.id));
-  for (let i = 0; i < questions.length; i += VERIFY_BATCH) {
+  const batches = packVerifyBatches(questions, excerpts);
+  let checkpointWrite = Promise.resolve();
+  const queueCheckpoint = async (): Promise<void> => {
+    checkpointWrite = checkpointWrite.then(() => saveCheckpoint());
+    await checkpointWrite;
+  };
+  await mapLimit(batches, VERIFY_CONCURRENCY, async (batch, index) => {
     if (ctx.signal?.aborted) throw new Error('已取消');
-    const batch = questions.slice(i, i + VERIFY_BATCH);
-    if (batch.every((q) => results.has(q.id))) continue;
-    log(`  对抗校验批次 ${Math.floor(i / VERIFY_BATCH) + 1}/${Math.ceil(questions.length / VERIFY_BATCH)} ...`);
+    if (batch.every((q) => results.has(q.id))) return;
+    log(`  对抗校验批次 ${index + 1}/${batches.length}(${batch.length} 题)...`);
     try {
       const raw = await client.chat(
         [
           { role: 'system', content: STAGE3_VERIFY_SYSTEM },
           { role: 'user', content: stage3VerifyUser(buildVerifyItems(batch, excerpts)) },
         ],
-        { temperature: 0.1, jsonMode: true, maxTokens: 8000, signal: ctx.signal }
+        { requestType: 'stage3-verify', temperature: 0.05, jsonMode: true, maxTokens: 6500, hardMaxTokens: 10000, signal: ctx.signal, mode: ctx.mode }
       );
       const parsed = parseJsonLoose<{ results?: VerificationResult[] }>(raw);
       for (const r of Array.isArray(parsed.results) ? parsed.results : []) {
-        if (!r || typeof r.id !== 'string') continue;
-        if (!idSet.has(r.id)) continue; // 幻觉 ID 不入库(此前会永久残留)
-        if (!VERDICTS.has(r.verdict)) continue; // 非法裁决丢弃,该题按未覆盖处理
+        if (!r || typeof r.id !== 'string' || !idSet.has(r.id) || !VERDICTS.has(r.verdict)) continue;
         results.set(r.id, r);
       }
-      saveCheckpoint();
+      await queueCheckpoint();
     } catch (err) {
       if (String(err instanceof Error ? err.message : err) === '已取消') throw err;
-      warn(`  [警告] 校验批次失败,该批题目将标记为未覆盖(unverified):${err instanceof Error ? err.message : err}`);
+      warn(`  [警告] 校验批次 ${index + 1} 失败,对应题目将标记为未覆盖(unverified):${err instanceof Error ? err.message : err}`);
     }
-  }
+  });
+  await checkpointWrite;
 
   // 应用裁决:LLM 未覆盖 → unverified(不再默认 pass);确定性错误的题不得被模型 pass 覆盖
   let pass = 0;
@@ -359,6 +406,21 @@ export async function runStage3(
     warn(`  [复检] ${qid} 修正引用非法,已回退:${errs[0]}`);
   }
 
+  // Final deterministic gate is authoritative. Recompute counters after any
+  // citation repair/rollback so the report cannot claim pass for an invalid cite.
+  const finalCheck = deterministicCheck(facts, questions);
+  for (const q of questions) {
+    const errs = finalCheck.lineErrors.get(q.id);
+    if (errs) {
+      q.verified = 'flag';
+      q.verifyNote = `${q.verifyNote ?? ''} | 最终确定性检查失败:${errs.join(';')}`.trim();
+    }
+  }
+  pass = questions.filter((q) => q.verified === 'pass').length;
+  fix = questions.filter((q) => q.verified === 'fix').length;
+  flag = questions.filter((q) => q.verified === 'flag').length;
+  unverified = questions.filter((q) => q.verified === 'unverified').length;
+
   // 写修订后的题库与校验报告
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(outDir, 'questions.json'), JSON.stringify(questions, null, 2), 'utf-8');
@@ -368,7 +430,7 @@ export async function runStage3(
     fix,
     flag,
     unverified,
-    deterministicIssues: lineErrors.size,
+    deterministicIssues: finalCheck.lineErrors.size,
   };
   writeVerifyReport(questions, outDir, stats);
   log(`  校验完成:pass=${pass} fix=${fix} flag=${flag} unverified=${unverified} → 校验报告.md`);

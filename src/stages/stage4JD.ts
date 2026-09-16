@@ -74,7 +74,7 @@ export async function runStage4(
           { role: 'system', content: STAGE4_JD_SYSTEM },
           { role: 'user', content: stage4JdUser(jdText.slice(0, 6000), list) },
         ],
-        { temperature, jsonMode: true, maxTokens: 6000, signal: ctx.signal }
+        { requestType: 'stage4-jd', temperature, jsonMode: true, maxTokens: 3500, hardMaxTokens: 7000, signal: ctx.signal, mode: ctx.mode }
       );
     // 最多两次:第一次形状漂移(常见于推理模型)时降温重试
     for (let attempt = 0; attempt < 2 && !analysis; attempt++) {
@@ -115,6 +115,7 @@ export async function runStage4(
     '',
   ];
   fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(path.join(outDir, 'jd_analysis.json'), JSON.stringify(analysis, null, 2), 'utf-8');
   fs.writeFileSync(path.join(outDir, '00_JD定制分析.md'), md.join('\n'), 'utf-8');
   log(`  必考 Top${mustAsk.length} 已标记 → 00_JD定制分析.md`);
   return analysis;

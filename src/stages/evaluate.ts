@@ -165,7 +165,7 @@ ${excerptOf(q).slice(0, 5000)}`
         { role: 'system', content: system },
         { role: 'user', content: user },
       ],
-      { temperature: 0.1, jsonMode: true, maxTokens, signal: ctx.signal }
+      { requestType: 'evaluate', temperature: 0.1, jsonMode: true, maxTokens, hardMaxTokens: 6000, signal: ctx.signal, mode: ctx.mode }
     );
     let parsed: Record<string, unknown>;
     try {

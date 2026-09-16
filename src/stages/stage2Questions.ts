@@ -13,8 +13,9 @@ import { deterministicCheck } from './stage3Verify';
 import { StageRunContext } from './stage1Read';
 import { log, warn } from '../core/logger';
 
-// 推理模型输出上限有限:小批次富 JSON 更稳(截断修复 + 补题轮兜底)
-const BATCH_SIZE = 5;
+// 平衡模式每批 10 题；深度模式每批 8 题给严格 JSON 留余量。
+const BALANCED_BATCH_SIZE = 10;
+const BATCH_CONCURRENCY = 3;
 /** 补题轮上限:防止模型持续返回不可用题目时的无限循环 */
 const MAX_TOPUP_ROUNDS = 4;
 
@@ -67,6 +68,14 @@ function normalizeStem(q: string): string {
   return q.replace(/\s+/g, '').toLowerCase().slice(0, 80);
 }
 
+function promptAskedStems(askedStems: string[]): string[] {
+  // Local dedup keeps the complete history; only a compact recent semantic window
+  // is sent to the model so prompt size does not grow linearly for every batch.
+  const recent = askedStems.slice(-24).map((s) => s.replace(/\s+/g, ' ').slice(0, 140));
+  if (askedStems.length > recent.length) recent.unshift(`（前 ${askedStems.length - recent.length} 题已在本地指纹去重，仅展示最近题干）`);
+  return recent;
+}
+
 interface GenResult {
   questions: Question[];
   dropped: number;
@@ -97,7 +106,7 @@ async function generateBatch(
       requireComparison: s.requireComparison,
     })),
     fileList: [...chunkIndex.entries()].map(([f, v]) => `${f}(${v.lines})`),
-    askedStems,
+    askedStems: promptAskedStems(askedStems),
   };
 
   const callAndParse = async (topup: boolean): Promise<unknown[]> => {
@@ -109,7 +118,7 @@ async function generateBatch(
           content: stage2BatchUser(input) + (topup ? `\n\n${STAGE2_TOPUP_USER_HINT}\n请重点补齐这些缺口题位,不要与"已出题目"列表里的任何题语义重复。` : ''),
         },
       ],
-      { temperature: topup ? 0.6 : 0.5, jsonMode: true, maxTokens: 8000, signal: ctx.signal }
+      { requestType: 'stage2-question', temperature: topup ? 0.45 : 0.35, jsonMode: true, maxTokens: 11000, hardMaxTokens: 16000, signal: ctx.signal, mode: ctx.mode }
     );
     const parsed = parseJsonLoose<{ questions?: unknown[] }>(raw);
     return Array.isArray(parsed.questions) ? parsed.questions : [];
@@ -152,7 +161,7 @@ async function generateBatch(
           { role: 'system', content: STAGE2_REPAIR_SYSTEM },
           { role: 'user', content: stage2RepairUser(bad) },
         ],
-        { temperature: 0.3, jsonMode: true, maxTokens: 8000, signal: ctx.signal }
+        { requestType: 'stage2-repair', temperature: 0.2, jsonMode: true, maxTokens: 6000, hardMaxTokens: 10000, signal: ctx.signal, mode: ctx.mode }
       );
       const fixed = parseJsonLoose<{ questions?: unknown[] }>(raw);
       const list = Array.isArray(fixed.questions) ? fixed.questions : [];
@@ -203,7 +212,10 @@ export async function runStage2(
 ): Promise<Question[]> {
   const slots = buildSlots(cards, knowledge);
   const quota = totalQuota();
-  log(`  覆盖矩阵:${slots.length} 个题位(配额合计 ${quota})`);
+  const targetQuota = ctx.mode === 'economy' ? Math.min(40, quota) : quota;
+  const targetSlots = slots.slice(0, targetQuota);
+  const batchSize = ctx.mode === 'deep' ? 8 : BALANCED_BATCH_SIZE;
+  log(`  覆盖矩阵:${targetSlots.length}/${quota} 个题位(模式 ${ctx.mode ?? 'balanced'})`);
 
   // 文件 → 可引用行数范围索引
   const chunkIndex = new Map<string, { lines: string }>();
@@ -213,36 +225,46 @@ export async function runStage2(
 
   const all: Question[] = [];
   const askedStems: string[] = [];
+  const acceptedStems = new Set<string>();
   let idCounter = 1;
-  const fillFromBatch = async (batchSlots: Slot[], mode: 'normal' | 'topup') => {
-    const { questions } = await generateBatch(client, facts, cards, knowledge, chunkIndex, batchSlots, askedStems, ctx, mode);
+  const appendResult = (questions: Question[]): void => {
     for (const q of questions) {
-      if (all.length >= quota) break;
+      if (all.length >= targetQuota) break;
+      const stem = normalizeStem(q.question);
+      if (!stem || acceptedStems.has(stem)) continue;
+      acceptedStems.add(stem);
       q.id = `Q${String(idCounter++).padStart(2, '0')}`;
       all.push(q);
       askedStems.push(q.question);
     }
   };
+  const fillFromBatch = async (batchSlots: Slot[], mode: 'normal' | 'topup', asked = askedStems): Promise<void> => {
+    const { questions } = await generateBatch(client, facts, cards, knowledge, chunkIndex, batchSlots, asked, ctx, mode);
+    appendResult(questions);
+  };
 
-  for (let i = 0; i < slots.length; i += BATCH_SIZE) {
+  for (let i = 0; i < targetSlots.length; i += batchSize * BATCH_CONCURRENCY) {
     if (ctx.signal?.aborted) throw new Error('已取消');
-    const batchSlots = slots.slice(i, i + BATCH_SIZE);
-    log(
-      `  出题批次 ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(slots.length / BATCH_SIZE)}(${batchSlots[0].category} 等 ${batchSlots.length} 题)...`
-    );
-    await fillFromBatch(batchSlots, 'normal');
+    const wave = Array.from({ length: BATCH_CONCURRENCY }, (_, n) => targetSlots.slice(i + n * batchSize, i + (n + 1) * batchSize)).filter((s) => s.length);
+    const totalBatches = Math.ceil(targetSlots.length / batchSize);
+    log(`  出题批次 ${Math.floor(i / batchSize) + 1}-${Math.floor(i / batchSize) + wave.length}/${totalBatches} 并发 ${wave.length} 批...`);
+    // Independent batches share only a bounded snapshot of history. Results are
+    // merged in slot order, with a local fingerprint set preventing cross-batch duplicates.
+    const askedSnapshot = askedStems.slice();
+    const results = await Promise.all(wave.map((batchSlots) => generateBatch(client, facts, cards, knowledge, chunkIndex, batchSlots, askedSnapshot, ctx, 'normal')));
+    results.forEach((result) => appendResult(result.questions));
   }
 
   // 补题轮:按"类别×难度缺口"定向补齐(此前 slots.slice(all.length) 的窗口在批间坍塌后漂移,
   // 丢失的类别永远不补,而补进来的题挤占别的配额——审计 R-5)
   let rounds = 0;
-  let deficit = computeDeficitSlots(all, cards, knowledge);
-  while (deficit.length > 0 && all.length < quota && rounds < MAX_TOPUP_ROUNDS) {
+  let deficit = ctx.mode === 'economy' ? [] : computeDeficitSlots(all, cards, knowledge);
+  while (deficit.length > 0 && all.length < targetQuota && rounds < MAX_TOPUP_ROUNDS) {
     rounds++;
     log(`  配额缺口 ${deficit.length} 题(${[...new Set(deficit.map((d) => `${d.category}|${d.difficulty}`))].join('、')}),补题第 ${rounds}/${MAX_TOPUP_ROUNDS} 轮 ...`);
-    for (let i = 0; i < deficit.length && all.length < quota; i += BATCH_SIZE) {
+    for (let i = 0; i < deficit.length && all.length < targetQuota; i += batchSize) {
       if (ctx.signal?.aborted) throw new Error('已取消');
-      await fillFromBatch(deficit.slice(i, i + BATCH_SIZE), 'topup');
+      await fillFromBatch(deficit.slice(i, i + batchSize), 'topup');
     }
     deficit = computeDeficitSlots(all, cards, knowledge);
   }
@@ -251,7 +273,8 @@ export async function runStage2(
   fs.writeFileSync(path.join(outDir, 'questions.json'), JSON.stringify(all, null, 2), 'utf-8');
   // 题库已重新生成:校验断点作废
   resetVerifyCheckpoint(outDir);
-  log(`  已产出 ${all.length}/${quota} 题 → questions.json`);
+  log(`  已产出 ${all.length}/${targetQuota} 题 → questions.json`);
+  if (ctx.mode === 'economy') warn(`  [限制] 经济模式只生成 ${targetQuota} 题，未承诺完整 100 题与全量校验`);
   if (deficit.length) {
     warn(`  [注意] 仍有配额缺口 ${deficit.length} 题(当前 ${all.length}),可运行 topup 子命令继续补齐`);
   }
@@ -304,10 +327,11 @@ export async function topUpToQuota(
   const askedStems = existing.map((q) => q.question);
   let idCounter = maxQuestionId(existing) + 1;
 
-  for (let i = 0; i < missingSlots.length; i += BATCH_SIZE) {
+  const batchSize = ctx.mode === 'deep' ? 8 : BALANCED_BATCH_SIZE;
+  for (let i = 0; i < missingSlots.length; i += batchSize) {
     if (ctx.signal?.aborted) throw new Error('已取消');
-    const chunkSlots = missingSlots.slice(i, i + BATCH_SIZE);
-    log(`  补题批次 ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(missingSlots.length / BATCH_SIZE)} ...`);
+    const chunkSlots = missingSlots.slice(i, i + batchSize);
+    log(`  补题批次 ${Math.floor(i / batchSize) + 1}/${Math.ceil(missingSlots.length / batchSize)} ...`);
     const { questions } = await generateBatch(client, facts, cards, knowledge, chunkIndex, chunkSlots, askedStems, ctx, 'topup');
     for (const q of questions) {
       if (existing.length >= quota) break;
@@ -374,7 +398,7 @@ export async function repairComparisons(
             { role: 'system', content: STAGE2_CMP_REPAIR_SYSTEM },
             { role: 'user', content: material },
           ],
-          { temperature: a === 0 ? 0.3 : 0.5, jsonMode: true, maxTokens: 4000, signal: ctx.signal }
+          { requestType: 'stage2-comparison', temperature: a === 0 ? 0.2 : 0.35, jsonMode: true, maxTokens: 2600, hardMaxTokens: 5000, signal: ctx.signal, mode: ctx.mode }
         );
         const parsed = parseJsonLoose<{ 对比?: unknown }>(raw);
         if (isValidComparison(parsed?.对比)) {
@@ -461,7 +485,7 @@ export async function repairAnnotationAnswers(
             { role: 'system', content: STAGE2_POINTS_REPAIR_SYSTEM },
             { role: 'user', content: material },
           ],
-          { temperature: a === 0 ? 0.3 : 0.5, jsonMode: true, maxTokens: 3000, signal: ctx.signal }
+          { requestType: 'stage2-points', temperature: a === 0 ? 0.15 : 0.25, jsonMode: true, maxTokens: 2200, hardMaxTokens: 4500, signal: ctx.signal, mode: ctx.mode }
         );
         if (tryApply(raw)) {
           cache.set(key, raw);
@@ -547,7 +571,7 @@ export async function rewriteFlaggedAnswers(
             { role: 'system', content: STAGE2_FLAG_REWRITE_SYSTEM },
             { role: 'user', content: material },
           ],
-          { temperature: 0.2, jsonMode: true, maxTokens: 3000, signal: ctx.signal }
+          { requestType: 'stage3-rewrite', temperature: 0.1, jsonMode: true, maxTokens: 2200, hardMaxTokens: 4500, signal: ctx.signal, mode: ctx.mode }
         );
         if (tryApply(raw)) {
           cache.set(key, raw);

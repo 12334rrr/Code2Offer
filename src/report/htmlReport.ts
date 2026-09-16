@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { ProjectKnowledge, Question } from '../core/schemas';
 
 export interface HtmlData {
@@ -9,7 +10,8 @@ export interface HtmlData {
     复述侧重?: { 多讲: string[]; 少讲: string[] };
     关键词?: string[];
   };
-  stats: { pass: number; fix: number; flag: number };
+  stats: { pass: number; fix: number; flag: number; unverified?: number };
+  quality?: { grade: string; score: number; aPlusEligible: boolean; reasons?: string[] };
   model: string;
   generatedAt: string;
   /** localStorage 命名空间键(默认按生成时间隔离):不同仓库的进度互不串扰 */
@@ -119,8 +121,9 @@ function questionCard(q: Question): string {
 export function renderHtml(data: HtmlData): string {
   const cats = [...new Set(data.questions.map((q) => q.category))];
   const mustCount = data.questions.filter((q) => q.必考).length;
-  const dataJson = JSON.stringify({ total: data.questions.length }).replace(/</g, '\\u003c');
-  const storeKey = `cip-progress-${data.repoKey ?? 'default'}`;
+  const questionVersion = crypto.createHash('sha1').update(JSON.stringify(data.questions)).digest('hex').slice(0, 12);
+  const dataJson = JSON.stringify({ total: data.questions.length, questionVersion }).replace(/</g, '\\u003c');
+  const storeKey = `cip-progress-v2-${data.repoKey ?? 'default'}-${questionVersion}`;
 
   const jdHtml = data.jd
     ? `<section class="jd">
@@ -148,7 +151,8 @@ export function renderHtml(data: HtmlData): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>代码转面试 · 面试材料报告</title>
 <style>
-:root{--bg:#f6f7f9;--card:#fff;--ink:#1c2330;--muted:#6b7480;--line:#e3e7ec;--blue:#2563eb;--green:#16a34a;--red:#dc2626;--amber:#d97706}
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1c2330;--muted:#6b7480;--line:#e3e7ec;--blue:#2563eb;--green:#16a34a;--red:#dc2626;--amber:#d97706;--focus:#1d4ed8}
+body.dark{--bg:#111827;--card:#1f2937;--ink:#f3f4f6;--muted:#aab4c2;--line:#374151;--blue:#60a5fa;--green:#4ade80;--red:#f87171;--amber:#fbbf24;--focus:#93c5fd}
 *{box-sizing:border-box}
 body{margin:0;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--ink)}
 header{background:#111827;color:#fff;padding:18px 24px}
@@ -161,7 +165,14 @@ header h1{margin:0 0 6px;font-size:20px}
 .toolbar input[type=text]{flex:1;min-width:200px;padding:7px 10px;border:1px solid var(--line);border-radius:6px;font-size:14px}
 .toolbar select{padding:7px;border:1px solid var(--line);border-radius:6px}
 .tbtn{padding:7px 12px;border:1px solid var(--line);background:#fff;border-radius:6px;cursor:pointer;font-size:13px}
+body.dark .tbtn,body.dark .toolbar input,body.dark .toolbar select{background:var(--card);color:var(--ink)}
 .tbtn.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+.tbtn.issue.active{background:var(--red);border-color:var(--red)}
+.tbtn.weak.active{background:var(--amber);border-color:var(--amber);color:#111827}
+.quality{display:inline-flex;align-items:center;gap:6px;margin-top:8px;color:#d1d5db;font-size:12px}
+.quality b{font-size:16px;color:#fff}
+.progress-summary{color:var(--muted);font-size:12px;min-width:150px}
+button:focus-visible,input:focus-visible,select:focus-visible,a:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .layout{display:flex;gap:20px;padding:20px 24px;align-items:flex-start}
 aside{width:230px;flex-shrink:0;position:sticky;top:64px}
 .side-cat{background:var(--card);border:1px solid var(--line);border-radius:8px;margin-bottom:12px;overflow:hidden}
@@ -195,6 +206,10 @@ h3.q{margin:8px 0 4px;font-size:15px;line-height:1.5}
 .follow{color:#475569;margin:2px 0}
 .wrong{color:#7f1d1d;background:#fef2f2;border-radius:6px;padding:6px 10px}
 .warn{color:#991b1b;background:#fee2e2;border-radius:6px;padding:6px 10px}
+body.dark .wrong,body.dark .warn{color:#fecaca;background:#451a1a}
+.cmp{display:block;overflow-x:auto}
+.cmp-conclusion{min-width:520px}
+mark.hit{background:#fde68a;color:#111827;border-radius:2px;padding:0 1px}
 .card-foot{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
 .card-foot button{padding:5px 10px;border:1px solid var(--line);background:#f9fafb;border-radius:6px;cursor:pointer;font-size:12px}
 .selftest .ok:hover{background:#dcfce7}
@@ -214,7 +229,8 @@ footer{color:var(--muted);font-size:12px;padding:10px 24px 30px}
 <body>
 <header>
   <h1>代码转面试 · 面试材料报告</h1>
-  <div class="meta">生成时间 ${esc(data.generatedAt)} · 模型 ${esc(data.model)} · 校验 通过 <b>${data.stats.pass}</b> / 修订 <b>${data.stats.fix}</b> / 标红 <b>${data.stats.flag}</b></div>
+  <div class="meta">生成时间 ${esc(data.generatedAt)} · 模型 ${esc(data.model)} · 校验 通过 <b>${data.stats.pass}</b> / 修订 <b>${data.stats.fix}</b> / 标红 <b>${data.stats.flag}</b> / 未覆盖 <b>${data.stats.unverified ?? data.questions.filter((q) => q.verified === 'unverified').length}</b></div>
+  ${data.quality ? `<div class="quality" aria-label="质量门禁等级">质量门禁 <b>${esc(data.quality.grade)}</b> · ${data.quality.score}/100${data.quality.aPlusEligible ? ' · A+ 已通过' : ' · 仍需处理'}</div>` : ''}
   <div class="stats">
     <span class="stat">题库共 ${data.questions.length} 题</span>
     <span class="stat">必考 ${mustCount} 题</span>
@@ -224,17 +240,22 @@ footer{color:var(--muted);font-size:12px;padding:10px 24px 30px}
 </header>
 
 <div class="toolbar">
-  <input type="text" id="search" placeholder="搜索问题/要点/追问/对比…" autocomplete="off">
-  <select id="catSel">
+  <input type="text" id="search" aria-label="搜索问题、要点、追问和对比" placeholder="搜索问题/要点/追问/对比…" autocomplete="off">
+  <select id="catSel" aria-label="按类别筛选">
     <option value="">全部类别</option>${catOptions}
   </select>
-  <button type="button" class="tbtn diff active" data-d="">全部难度</button>
-  <button type="button" class="tbtn diff" data-d="基础">基础</button>
-  <button type="button" class="tbtn diff" data-d="进阶">进阶</button>
-  <button type="button" class="tbtn diff" data-d="刁钻">刁钻</button>
-  <button type="button" class="tbtn" id="mustBtn">只看必考</button>
+  <button type="button" class="tbtn diff active" data-d="" aria-pressed="true">全部难度</button>
+  <button type="button" class="tbtn diff" data-d="基础" aria-pressed="false">基础</button>
+  <button type="button" class="tbtn diff" data-d="进阶" aria-pressed="false">进阶</button>
+  <button type="button" class="tbtn diff" data-d="刁钻" aria-pressed="false">刁钻</button>
+  <button type="button" class="tbtn" id="mustBtn" aria-pressed="false">只看必考</button>
+  <button type="button" class="tbtn weak" id="weakBtn" aria-pressed="false">只练未掌握</button>
+  <button type="button" class="tbtn issue" id="issueBtn" aria-pressed="false">只看标红/未覆盖</button>
+  <button type="button" class="tbtn" id="themeBtn" aria-label="切换深色和浅色主题">深色主题</button>
+  <button type="button" class="tbtn" id="exportBtn">导出学习进度</button>
   <button type="button" class="tbtn" id="expandAll">全部展开</button>
   <button type="button" class="tbtn" id="collapseAll">全部收起</button>
+  <span class="progress-summary" id="progressSummary" aria-live="polite"></span>
 </div>
 
 <div class="layout">
@@ -263,14 +284,38 @@ document.getElementById('search').addEventListener('input', debounce(applyFilter
 document.getElementById('catSel').addEventListener('change', applyFilter);
 Array.prototype.forEach.call(document.querySelectorAll('.tbtn.diff'), function(b){
   b.addEventListener('click', function(){
-    Array.prototype.forEach.call(document.querySelectorAll('.tbtn.diff'), function(x){ x.classList.remove('active'); });
+    Array.prototype.forEach.call(document.querySelectorAll('.tbtn.diff'), function(x){ x.classList.remove('active'); x.setAttribute('aria-pressed','false'); });
     b.classList.add('active');
+    b.setAttribute('aria-pressed','true');
     applyFilter();
   });
 });
 document.getElementById('mustBtn').addEventListener('click', function(){
   this.classList.toggle('active');
+  this.setAttribute('aria-pressed', this.classList.contains('active') ? 'true' : 'false');
   applyFilter();
+});
+document.getElementById('weakBtn').addEventListener('click', function(){
+  this.classList.toggle('active');
+  this.setAttribute('aria-pressed', this.classList.contains('active') ? 'true' : 'false');
+  applyFilter();
+});
+document.getElementById('issueBtn').addEventListener('click', function(){
+  this.classList.toggle('active');
+  this.setAttribute('aria-pressed', this.classList.contains('active') ? 'true' : 'false');
+  applyFilter();
+});
+document.getElementById('themeBtn').addEventListener('click', function(){
+  document.body.classList.toggle('dark');
+  var dark = document.body.classList.contains('dark');
+  this.textContent = dark ? '浅色主题' : '深色主题';
+  try { localStorage.setItem(STORE_KEY + '-theme', dark ? 'dark' : 'light'); } catch(e){}
+});
+document.getElementById('exportBtn').addEventListener('click', function(){
+  var blob = new Blob([JSON.stringify({ questionVersion: DATA.questionVersion, marks: store }, null, 2)], {type:'application/json'});
+  var url = URL.createObjectURL(blob), a = document.createElement('a');
+  a.href = url; a.download = 'code2offer-learning-progress.json'; a.click();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 0);
 });
 document.getElementById('expandAll').addEventListener('click', function(){ setAllAnswers(true); });
 document.getElementById('collapseAll').addEventListener('click', function(){ setAllAnswers(false); });
@@ -283,8 +328,8 @@ document.getElementById('list').addEventListener('click', function(ev){
     if (a) a.classList.toggle('hidden');
     return;
   }
-  var mark = t.closest ? t.closest('.js-mark') : null;
-  if (mark) mark(mark.getAttribute('data-id'), mark.getAttribute('data-ok') === '1');
+  var markButton = t.closest ? t.closest('.js-mark') : null;
+  if (markButton) markQuestion(markButton.getAttribute('data-id'), markButton.getAttribute('data-ok') === '1');
 });
 document.getElementById('sidebar').addEventListener('click', function(ev){
   var b = ev.target.closest ? ev.target.closest('.side-btn') : null;
@@ -309,14 +354,19 @@ function applyFilter(){
   var cat = document.getElementById('catSel').value;
   var curDiff = (document.querySelector('.tbtn.diff.active') || {}).getAttribute ? document.querySelector('.tbtn.diff.active').getAttribute('data-d') : '';
   var mustOnly = document.getElementById('mustBtn').classList.contains('active');
+  var weakOnly = document.getElementById('weakBtn').classList.contains('active');
+  var issueOnly = document.getElementById('issueBtn').classList.contains('active');
   var visible = 0;
   Array.prototype.forEach.call(document.querySelectorAll('.card'), function(c){
     var ok = true;
     if (cat && c.getAttribute('data-cat') !== cat) ok = false;
     if (ok && curDiff && c.getAttribute('data-diff') !== curDiff) ok = false;
     if (ok && mustOnly && c.getAttribute('data-must') !== '1') ok = false;
+    if (ok && weakOnly && store[c.id] !== 0) ok = false;
+    if (ok && issueOnly && !c.querySelector('.badge.flag,.badge.unv')) ok = false;
     if (ok && kw && c.getAttribute('data-text').indexOf(kw) === -1) ok = false;
     c.style.display = ok ? '' : 'none';
+    highlightQuestion(c, kw);
     if (ok) visible++;
   });
   document.getElementById('empty').classList.toggle('hidden', visible > 0);
@@ -327,6 +377,7 @@ function mark(qid, ok){
   updateMarkStatus(qid);
   updateSidebarCat(qid);
 }
+function markQuestion(qid, ok){ mark(qid, ok); applyFilter(); updateProgressSummary(); }
 function updateMarkStatus(qid){
   var el = document.querySelector('[data-st="' + qid + '"]');
   if (!el) return;
@@ -374,8 +425,30 @@ function updateSidebarCatFor(cat){
   if (bar) bar.style.width = pct + '%';
 }
 function escAttr(s){ return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+function highlightQuestion(card, kw){
+  var h = card && card.querySelector('.q'); if (!h) return;
+  if (h.dataset.rawText === undefined) h.dataset.rawText = h.textContent || '';
+  var raw = h.dataset.rawText;
+  while (h.firstChild) h.removeChild(h.firstChild);
+  if (!kw) { h.appendChild(document.createTextNode(raw)); return; }
+  var lower = raw.toLowerCase(), needle = kw.toLowerCase(), pos = 0, at;
+  while ((at = lower.indexOf(needle, pos)) >= 0) {
+    h.appendChild(document.createTextNode(raw.slice(pos, at)));
+    var m = document.createElement('mark'); m.className = 'hit'; m.textContent = raw.slice(at, at + needle.length); h.appendChild(m);
+    pos = at + needle.length;
+  }
+  h.appendChild(document.createTextNode(raw.slice(pos)));
+}
+function updateProgressSummary(){
+  var cards = document.querySelectorAll('.card'), mastered = 0, weak = 0;
+  Array.prototype.forEach.call(cards, function(c){ if (store[c.id] === 1) mastered++; else if (store[c.id] === 0) weak++; });
+  var el = document.getElementById('progressSummary');
+  if (el) el.textContent = '自测进度: ' + mastered + '/' + cards.length + ' 已掌握 · ' + weak + ' 道弱项';
+}
+try { if (localStorage.getItem(STORE_KEY + '-theme') === 'dark') { document.body.classList.add('dark'); document.getElementById('themeBtn').textContent = '浅色主题'; } } catch(e){}
 Array.prototype.forEach.call(document.querySelectorAll('.card'), function(c){ updateMarkStatus(c.id); });
 renderSidebar();
+updateProgressSummary();
 </script>
 </body>
 </html>`;

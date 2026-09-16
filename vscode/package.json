@@ -2,7 +2,7 @@
   "name": "code-interview-prep",
   "displayName": "Code2Offer 代码转面试",
   "description": "对当前仓库一键生成面试全套材料:项目讲解、百问百答(含横向选型对比)、亮点防守、缺点改进、可搜索自测 HTML 报告。由 DeepSeek 驱动。",
-  "version": "0.4.0",
+  "version": "0.5.2",
   "publisher": "DawnofHope",
   "repository": {
     "type": "git",
@@ -17,7 +17,7 @@
   },
   "categories": ["Other", "Education"],
   "keywords": ["面试", "interview", "deepseek", "代码分析", "interview-preparation"],
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -54,6 +54,11 @@
         "command": "codeInterviewPrep.openOutput",
         "title": "代码转面试:打开产物文件夹",
         "icon": "$(folder-opened)"
+      },
+      {
+        "command": "codeInterviewPrep.openQuality",
+        "title": "代码转面试:查看质量门禁",
+        "icon": "$(verified)"
       },
       {
         "command": "codeInterviewPrep.openSettings",

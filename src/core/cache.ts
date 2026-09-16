@@ -7,6 +7,9 @@ import * as crypto from 'crypto';
  * 重跑(改 JD / 校验失败重试 / 增量补题)只花增量钱。
  */
 export class DiskCache {
+  private hitCount = 0;
+  private missCount = 0;
+  private writeCount = 0;
   constructor(private dir: string) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -25,10 +28,13 @@ export class DiskCache {
 
   get<T>(k: string): T | undefined {
     const p = this.pathOf(k);
-    if (!fs.existsSync(p)) return undefined;
+    if (!fs.existsSync(p)) { this.missCount++; return undefined; }
     try {
-      return JSON.parse(fs.readFileSync(p, 'utf-8')) as T;
+      const value = JSON.parse(fs.readFileSync(p, 'utf-8')) as T;
+      this.hitCount++;
+      return value;
     } catch {
+      this.missCount++;
       return undefined;
     }
   }
@@ -36,10 +42,12 @@ export class DiskCache {
   set(k: string, v: unknown): void {
     // 原子写:进程中途被杀不会留下截断的半份缓存
     const p = this.pathOf(k);
-    const tmp = `${p}.${process.pid}.tmp`;
+    const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
     try {
       fs.writeFileSync(tmp, JSON.stringify(v, null, 2));
+      if (fs.existsSync(p)) fs.unlinkSync(p);
       fs.renameSync(tmp, p);
+      this.writeCount++;
     } catch {
       try {
         fs.unlinkSync(tmp);
@@ -50,10 +58,15 @@ export class DiskCache {
     }
   }
 
+  stats(): { hits: number; misses: number; writes: number; hitRate: number } {
+    const total = this.hitCount + this.missCount;
+    return { hits: this.hitCount, misses: this.missCount, writes: this.writeCount, hitRate: total ? this.hitCount / total : 0 };
+  }
+
   private pathOf(k: string): string {
     return path.join(this.dir, `${k}.json`);
   }
 }
 
 /** 版本号:提示词或算法改动后 +1,使旧缓存自然失效 */
-export const PROMPT_VERSION = '2';
+export const PROMPT_VERSION = '3';
