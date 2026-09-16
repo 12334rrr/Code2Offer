@@ -19,6 +19,7 @@ import { RunMode } from './policy';
 import { writeQualityArtifacts } from './quality';
 import { allocateRunDir, carryForwardIncrement, repoRootOfOutput } from './runs';
 import { invokePipelineGraph } from './pipelineGraph';
+import { TavilyResearch, WebSource } from './webResearch';
 
 /** 阶段事件(0.4.0):供宿主渲染"时间轴 + 节点用时"进度 UI */
 export interface StageEvent {
@@ -272,6 +273,24 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
       profileCached ? '门控命中,复用上次画像' : `${facts.overview.totalFiles} 文件 / ${facts.readingPlan.length} 个精读文件 / ${chunks.length} 块`
     );
 
+    // Optional external references: only normalized language names are queried,
+    // never repository names, paths, source text, JD, or generated answers.
+    let externalReferences: WebSource[] = [];
+    if (cfg.tavilyApiKey) {
+      const research = new TavilyResearch({ apiKey: cfg.tavilyApiKey, cacheDir: path.join(outDir, '.cache', 'tavily'), maxCalls: 3, maxResults: 3 });
+      const technologies = Object.keys(facts.overview.languageNames ?? {}).slice(0, 3);
+      try {
+        for (const technology of technologies) {
+          externalReferences.push(...await research.searchPublicTechnicalFact(`${technology} official documentation`));
+        }
+        externalReferences = externalReferences.filter((source, index, all) => all.findIndex((item) => item.url === source.url) === index);
+        fs.writeFileSync(path.join(outDir, 'external_references.json'), JSON.stringify({ schemaVersion: 1, kind: 'external-reference-only', sources: externalReferences }, null, 2), 'utf8');
+        log(`  [Tavily] 已保存 ${externalReferences.length} 条外部参考；不会作为本地代码事实或题目引用。`);
+      } catch (err) {
+        warn(`  [Tavily] 联网增强失败，继续纯代码流程：${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     /* ---------- 阶段 1:精读 ---------- */
     banner('阶段 1:模块精读(DeepSeek)');
     stageBegin('read', '模块精读');
@@ -440,6 +459,7 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
       model: client.model, endpoint: cfg.baseUrl, configSources: cfg.sources, promptVersion: PROMPT_VERSION,
       repository: { root, snapshotHash: facts.snapshotHash ?? currentSnapshot, files: facts.overview.totalFiles, loc: facts.overview.totalLOC },
       ignored: facts.skippedByReason ?? {}, stageHashes: state.stages, stageDurations, usage: client.usage(), cache: cache.stats(), quality,
+      externalReferences: { enabled: Boolean(cfg.tavilyApiKey), count: externalReferences.length, file: externalReferences.length ? 'external_references.json' : undefined },
       // Never serialize cfg.apiKey or arbitrary model input.
     };
     fs.writeFileSync(path.join(outDir, 'run-manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
