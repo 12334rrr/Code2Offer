@@ -5,6 +5,7 @@ import {
   normalizeCiteLines,
   isValidComparison,
   coerceQuestion,
+  hasPresentationIssue,
   validateQuestion,
 } from '../core/schemas';
 
@@ -92,4 +93,16 @@ test('validateQuestion:技术选型对比类缺合格对比块报错', () => {
   );
   const errors = validateQuestion(q, files);
   assert.ok(errors.some((e) => e.includes('对比')), errors.join(';'));
+});
+
+test('validateQuestion:拒绝不可背诵的占位符和模糊定位', () => {
+  const q = {
+    category: '安全', difficulty: '基础', question: '请解释 X 和 Y 在该项目中的关系', 考察点: '输入校验',
+    答案要点: ['原文未完整展示，需补充后续逻辑', '正常要点', '正常要点二'],
+    代码依据: [{ file: 'src/a.ts', lines: '1-2' }], 追问链: ['server.ts:143附近做什么？', '如何修复？'], 加分回答: '正常', 常见错误回答: '正常',
+  };
+  const errors = validateQuestion(q, files);
+  assert.ok(errors.some((e) => /不可背诵/.test(e)));
+  assert.equal(hasPresentationIssue('第 70-140 行段内处理'), true);
+  assert.equal(hasPresentationIssue('读取请求后校验 title 字段'), false);
 });

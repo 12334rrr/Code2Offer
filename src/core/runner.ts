@@ -7,7 +7,7 @@ import { profileRepo, snapshotRepo } from './profiler';
 import { loadChunks } from './chunker';
 import { DiskCache, PROMPT_VERSION } from './cache';
 import { totalQuota, trimToQuotaDetailed } from './coverage';
-import { Question, isValidComparison } from './schemas';
+import { Question, isValidComparison, QUESTION_VALIDATION_VERSION } from './schemas';
 import { log, warn, withLogSink, LogSink } from './logger';
 import { runStage1, StageRunContext } from '../stages/stage1Read';
 import { runStage2, repairComparisons, repairAnnotationAnswers, rewriteFlaggedAnswers, resetVerifyCheckpoint } from '../stages/stage2Questions';
@@ -20,7 +20,7 @@ import { writeQualityArtifacts } from './quality';
 import { allocateRunDir, carryForwardIncrement, repoRootOfOutput } from './runs';
 import { invokePipelineGraph } from './pipelineGraph';
 import { TavilyResearch, WebSource } from './webResearch';
-import { STAGE2_SYSTEM } from './prompts';
+import { STAGE2_SYSTEM, STAGE3_VERIFY_SYSTEM } from './prompts';
 
 /** 阶段事件(0.4.0):供宿主渲染"时间轴 + 节点用时"进度 UI */
 export interface StageEvent {
@@ -322,7 +322,7 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     // Generation mode changes the requested quota/batching and therefore must
     // invalidate an economy preview instead of silently reusing its partial
     // question bank for a balanced or deep release run.
-    const s2Hash = shortHash(`v4|${opts.mode ?? 'balanced'}|${PROMPT_VERSION}|${sha1(STAGE2_SYSTEM)}|${s1Hash}|${sha1(JSON.stringify(cards))}|${sha1(JSON.stringify(knowledge))}|${cfg.model}`);
+    const s2Hash = shortHash(`v5|${opts.mode ?? 'balanced'}|${PROMPT_VERSION}|${QUESTION_VALIDATION_VERSION}|${sha1(STAGE2_SYSTEM)}|${s1Hash}|${sha1(JSON.stringify(cards))}|${sha1(JSON.stringify(knowledge))}|${cfg.model}`);
     let questions: Question[];
     let questionsReused = false;
     if (stageDone('questions', s2Hash) && fs.existsSync(qPath)) {
@@ -379,7 +379,7 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     const questionsHash = (qs: Question[]) =>
       sha1(qs.map((q) => JSON.stringify([q.id, q.question, q.答案要点, q.代码依据, q.对比 ?? null])).join('||'));
     const s3HashOf = () =>
-      shortHash(`v3|${questionsHash(questions)}|${chunksHash}|${cfg.model}`);
+      shortHash(`v4|${QUESTION_VALIDATION_VERSION}|${sha1(STAGE3_VERIFY_SYSTEM)}|${questionsHash(questions)}|${chunksHash}|${cfg.model}`);
     if (stageDone('verify', s3HashOf())) {
       log('  [门控命中] 校验结果已存在,直接复用');
       stageEnd('verify', '对抗校验', 'cached', '门控命中,复用校验结果');

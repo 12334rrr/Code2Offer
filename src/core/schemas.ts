@@ -4,6 +4,8 @@
  */
 
 export const DIFFICULTIES = ['基础', '进阶', '刁钻'] as const;
+/** Bump when deterministic user-facing question validation semantics change. */
+export const QUESTION_VALIDATION_VERSION = '2';
 export type Difficulty = (typeof DIFFICULTIES)[number];
 
 export interface CodeCite {
@@ -134,6 +136,18 @@ export function validateQuestion(q: unknown, files: Set<string>): string[] {
   if (typeof o.加分回答 !== 'string' || !o.加分回答) errors.push('加分回答 缺失');
   if (typeof o.常见错误回答 !== 'string' || !o.常见错误回答) errors.push('常见错误回答 缺失');
 
+  // User-facing interview material must be independently rehearsable. Do not
+  // allow model-process notes, vague source locations, or literal placeholders
+  // to enter the question bank merely because their JSON shape is valid.
+  const presentationFields: Array<[string, unknown]> = [
+    ['question', o.question], ['考察点', o.考察点], ['加分回答', o.加分回答], ['常见错误回答', o.常见错误回答],
+    ...(Array.isArray(o.答案要点) ? (o.答案要点 as unknown[]).map((v, i) => [`答案要点[${i}]`, v] as [string, unknown]) : []),
+    ...(Array.isArray(o.追问链) ? (o.追问链 as unknown[]).map((v, i) => [`追问链[${i}]`, v] as [string, unknown]) : []),
+  ];
+  for (const [field, value] of presentationFields) {
+    if (typeof value === 'string' && hasPresentationIssue(value)) errors.push(`${field} 含不可背诵的占位/模糊定位/过程性措辞`);
+  }
+
   // 追问链 >= 2
   if (!Array.isArray(o.追问链) || o.追问链.length < 2 || !o.追问链.every((x) => typeof x === 'string')) {
     errors.push('追问链 至少 2 条');
@@ -164,6 +178,11 @@ export function validateQuestion(q: unknown, files: Set<string>): string[] {
     errors.push('技术选型对比类题目必须包含结构完整的 对比 块(候选≥2/维度≥3/矩形表/含结论)');
   }
   return errors;
+}
+
+/** Reject strings that make a generated answer impossible to rehearse or verify. */
+export function hasPresentationIssue(text: string): boolean {
+  return /(?:所给|该|引用处)?原文.{0,8}(?:未完整展示|未展示|未提供)|(?:需|请).{0,5}(?:补充|核对)|无法确认|待(?:补充|确认)|\bX\s*(?:和|与)\s*Y\b|\d+\s*附近|\d+\s*[-~至]\s*\d+\s*行段内/.test(text);
 }
 
 /**
