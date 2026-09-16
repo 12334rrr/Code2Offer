@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import * as assert from 'node:assert';
 import { renderHtml } from '../report/htmlReport';
 import { ProjectKnowledge, Question } from '../core/schemas';
-import { sanitizeMdCell } from '../stages/stage5Assemble';
+import { comparisonTableMd, sanitizeMdCell } from '../stages/stage5Assemble';
 
 const knowledge: ProjectKnowledge = {
   一句话定位: '一个演示项目',
@@ -86,4 +86,12 @@ test('sanitizeMdCell:竖线转义、换行压平(表格不再被拆散)', () => 
   assert.strictEqual(sanitizeMdCell('a || b'), 'a \\|\\| b');
   assert.strictEqual(sanitizeMdCell('第一行\n第二行'), '第一行 第二行');
   assert.strictEqual(sanitizeMdCell(undefined), '');
+});
+
+test('comparisonTableMd:模型重复回显表头时只渲染一个表头', () => {
+  const lines = comparisonTableMd({
+    对比: { 候选方案: ['A', 'B'], 维度: ['性能', '成本'], 对比表: [['方案', '性能', '成本'], ['A', '高', '低'], ['B', '中', '中']], 结论: '按场景选择' },
+  } as any);
+  assert.equal(lines.filter((line) => line === '| 方案 | 性能 | 成本 |').length, 1);
+  assert.ok(lines.includes('| A | 高 | 低 |'));
 });

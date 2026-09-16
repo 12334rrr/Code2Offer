@@ -20,6 +20,7 @@ import { writeQualityArtifacts } from './quality';
 import { allocateRunDir, carryForwardIncrement, repoRootOfOutput } from './runs';
 import { invokePipelineGraph } from './pipelineGraph';
 import { TavilyResearch, WebSource } from './webResearch';
+import { STAGE2_SYSTEM } from './prompts';
 
 /** 阶段事件(0.4.0):供宿主渲染"时间轴 + 节点用时"进度 UI */
 export interface StageEvent {
@@ -321,7 +322,7 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     // Generation mode changes the requested quota/batching and therefore must
     // invalidate an economy preview instead of silently reusing its partial
     // question bank for a balanced or deep release run.
-    const s2Hash = shortHash(`v3|${opts.mode ?? 'balanced'}|${s1Hash}|${sha1(JSON.stringify(cards))}|${sha1(JSON.stringify(knowledge))}|${cfg.model}`);
+    const s2Hash = shortHash(`v4|${opts.mode ?? 'balanced'}|${PROMPT_VERSION}|${sha1(STAGE2_SYSTEM)}|${s1Hash}|${sha1(JSON.stringify(cards))}|${sha1(JSON.stringify(knowledge))}|${cfg.model}`);
     let questions: Question[];
     let questionsReused = false;
     if (stageDone('questions', s2Hash) && fs.existsSync(qPath)) {

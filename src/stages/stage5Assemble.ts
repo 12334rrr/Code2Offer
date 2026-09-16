@@ -121,10 +121,14 @@ async function generateMarkdown(
   return raw;
 }
 
-function comparisonTableMd(q: Question): string[] {
+export function comparisonTableMd(q: Question): string[] {
   const cmp = q.对比!;
   const dims = Array.isArray(cmp.维度) ? cmp.维度 : [];
-  const rows = Array.isArray(cmp.对比表) ? cmp.对比表 : [];
+  const rows = (Array.isArray(cmp.对比表) ? cmp.对比表 : []).filter((row) =>
+    // Older model outputs sometimes copied a Markdown header into the data
+    // array. The renderer owns that header, so render it exactly once.
+    !(String(row[0] ?? '').trim() === '方案' && row.slice(1).every((cell, index) => String(cell ?? '').trim() === String(dims[index] ?? '').trim()))
+  );
   const width = Math.max(dims.length + 1, ...(rows.length ? rows.map((r) => r.length) : [1]));
   const header = `| 方案 | ${dims.map(sanitizeMdCell).join(' | ')} |`;
   const sep = `|${Array(width).fill('---').join('|')}|`;
