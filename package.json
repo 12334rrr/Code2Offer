@@ -30,5 +30,11 @@
   "devDependencies": {
     "@types/node": "^20.14.0",
     "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.11",
+    "@langchain/langgraph": "^1.4.15",
+    "@tavily/core": "^0.7.12",
+    "langchain": "^1.5.11"
   }
 }
