@@ -12,6 +12,7 @@ import { RepoFacts } from '../core/profiler';
 import { ModuleCard, ProjectKnowledge } from '../core/schemas';
 import { RunMode } from '../core/policy';
 import { repoRootOfOutput } from '../core/runs';
+import { diagnoseDeepSeek } from '../core/diagnostics';
 
 const VERSION = '0.5.2';
 
@@ -34,6 +35,9 @@ const USAGE = `代码转面试 ${VERSION} — 读取完整代码仓库,生成真
 
   code2offer export-prompts [输出目录=docs/prompts]
       导出全部阶段提示词为 Markdown(可单独粘贴到任意大模型工具使用)
+
+  code2offer diagnose
+      使用与生成完全相同的配置和网络客户端发送最小 JSON 请求；不读取或发送仓库源码
 
   code2offer --version | --help
 
@@ -190,6 +194,13 @@ async function main(): Promise<void> {
       }
       fs.writeFileSync(path.join(outDir, 'README.md'), index.join('\n') + '\n', 'utf-8');
       console.log(`已导出 ${docs.length} 份提示词 → ${outDir}`);
+      break;
+    }
+    case 'diagnose': {
+      const cfg = loadConfig({ trustedDirs: [process.cwd(), toolRootDir()] });
+      const result = await diagnoseDeepSeek(cfg);
+      console.log(JSON.stringify(result, null, 2));
+      if (!result.ok) process.exitCode = 2;
       break;
     }
     default:
