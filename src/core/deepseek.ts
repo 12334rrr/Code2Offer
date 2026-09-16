@@ -19,7 +19,7 @@ export interface ChatOptions {
   mode?: RunMode;
 }
 
-export type DeepSeekErrorCode = 'http' | 'timeout' | 'network' | 'cancelled' | 'truncated' | 'empty' | 'invalid-json';
+export type DeepSeekErrorCode = 'http' | 'timeout' | 'network' | 'cancelled' | 'truncated' | 'empty' | 'invalid-json' | 'response-too-large';
 
 export class DeepSeekError extends Error {
   constructor(
@@ -50,9 +50,13 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function composeSignals(timeoutMs: number, external?: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
+function composeSignals(timeoutMs: number, external?: AbortSignal): { signal: AbortSignal; timedOut: () => boolean; cleanup: () => void } {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(new Error('aborted due to timeout')), timeoutMs);
+  let timeoutFired = false;
+  const timer = setTimeout(() => {
+    timeoutFired = true;
+    ctrl.abort(new Error('aborted due to timeout'));
+  }, timeoutMs);
   const onExternal = () => ctrl.abort(new Error('已取消'));
   if (external) {
     if (external.aborted) onExternal();
@@ -60,11 +64,54 @@ function composeSignals(timeoutMs: number, external?: AbortSignal): { signal: Ab
   }
   return {
     signal: ctrl.signal,
+    timedOut: () => timeoutFired,
     cleanup: () => {
       clearTimeout(timer);
       external?.removeEventListener('abort', onExternal);
     },
   };
+}
+
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Read the complete response while the request signal is still active.
+ * `fetch()` resolves as soon as headers arrive, so calling `Response.text()`
+ * after clearing the timeout leaves a hung body impossible to cancel.
+ */
+async function readResponseText(res: Response, signal: AbortSignal, maxBytes = MAX_RESPONSE_BYTES): Promise<string> {
+  const declared = Number(res.headers.get('content-length') ?? 0);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new DeepSeekError(`响应体过大(content-length=${declared}, 上限=${maxBytes})`, 'response-too-large');
+  }
+  if (!res.body) return '';
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = '';
+  const cancelReader = () => { void reader.cancel(signal.reason).catch(() => undefined); };
+  signal.addEventListener('abort', cancelReader, { once: true });
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      if (!next.value) continue;
+      bytes += next.value.byteLength;
+      if (bytes > maxBytes) {
+        cancelReader();
+        throw new DeepSeekError(`响应体超过 ${maxBytes} 字节上限`, 'response-too-large');
+      }
+      text += decoder.decode(next.value, { stream: true });
+    }
+    // Some stream implementations resolve a pending read as `done` when
+    // cancelled. Do not turn that cancellation into an empty JSON response.
+    if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('response read aborted');
+    return text + decoder.decode();
+  } finally {
+    signal.removeEventListener('abort', cancelReader);
+    reader.releaseLock();
+  }
 }
 
 function nestedErrorCode(value: unknown, seen = new Set<unknown>()): string | undefined {
@@ -229,7 +276,8 @@ export class DeepSeekClient {
           }
         }
         // Permanent authentication/parameter/resource errors never enter backoff.
-        if (status === 400 || status === 401 || status === 403 || status === 404) {
+        if (err instanceof DeepSeekError && err.code === 'response-too-large') throw err;
+        if (status === 400 || status === 401 || status === 402 || status === 403 || status === 404) {
           throw new DeepSeekError(msg, 'http', status);
         }
 
@@ -292,25 +340,17 @@ export class DeepSeekClient {
       max_tokens: Math.min(opts.hardMaxTokens, Math.max(1, Math.round((opts.maxTokens ?? opts.policy.baseMaxTokens) * requestScale))),
     };
     if (opts.jsonMode ?? opts.policy.jsonMode) body.response_format = { type: 'json_object' };
-    const { signal, cleanup } = composeSignals(opts.policy.timeout, opts.signal);
-    let res: Response;
+    const { signal, timedOut, cleanup } = composeSignals(opts.policy.timeout, opts.signal);
     try {
-      res = await fetch(this.cfg.baseUrl + '/chat/completions', {
+      const res = await fetch(this.cfg.baseUrl + '/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.cfg.apiKey}` },
         body: JSON.stringify(body),
         signal,
       });
-    } catch (err) {
-      if (opts.signal?.aborted) throw new DeepSeekError('已取消', 'cancelled');
-      const m = err instanceof Error ? err.message : String(err);
-      const isTimeout = /timeout|aborted/i.test(m) || /TIMEOUT/i.test(nestedErrorCode(err) ?? '');
-      throw new DeepSeekError(isTimeout ? `请求超时:${this.networkDiagnostic(err)}` : `网络请求失败:${this.networkDiagnostic(err)}`, isTimeout ? 'timeout' : 'network');
-    } finally {
-      cleanup();
-    }
-    const text = await res.text();
-    if (!res.ok) {
+      // Keep timeout/cancellation active until every byte has been read.
+      const text = await readResponseText(res, signal);
+      if (!res.ok) {
       let detail = text.slice(0, 500);
       try {
         const j = JSON.parse(text);
@@ -323,37 +363,46 @@ export class DeepSeekClient {
         retryAfterMs = Number.isFinite(seconds) ? seconds * 1000 : Math.max(0, new Date(retryAfter).getTime() - Date.now());
       }
       const retryable = res.status === 408 || res.status === 429 || res.status >= 500;
-      throw new DeepSeekError(
-        `HTTP ${res.status}: ${this.mask(String(detail)).slice(0, 500)}${res.status === 401 ? '(鉴权失败:请检查 DEEPSEEK_API_KEY 是否有效)' : ''}`,
-        retryable ? 'network' : 'http',
-        res.status,
-        Math.min(30_000, retryAfterMs)
-      );
-    }
-    let data: any;
-    try { data = JSON.parse(text); }
-    catch (err) { throw new DeepSeekError(`响应 JSON 无法解析:${err instanceof Error ? err.message : String(err)}`, 'invalid-json'); }
-    const choice = data?.choices?.[0];
-    const message = choice?.message ?? {};
-    const finish = choice?.finish_reason ?? '';
-    const promptTokens = Number(data?.usage?.prompt_tokens ?? 0) || 0;
-    const completionTokens = Number(data?.usage?.completion_tokens ?? 0) || 0;
-    this.totalPromptTokens += promptTokens;
-    this.totalCompletionTokens += completionTokens;
-    this.statsFor(type).promptTokens += promptTokens;
-    this.statsFor(type).completionTokens += completionTokens;
-    const content = typeof message.content === 'string' ? message.content : '';
-    if (!content.trim()) {
-      if (finish === 'length') throw new DeepSeekError('EMPTY_OUTPUT_MAX_TOKENS:输出预算被推理耗尽', 'truncated');
-      if (typeof message.reasoning_content === 'string' && message.reasoning_content.trim() && finish === 'stop') {
-        warn('[deepseek] content 为空(finish=stop),使用 reasoning_content 作为输出');
-        return message.reasoning_content;
+        throw new DeepSeekError(
+          `HTTP ${res.status}: ${this.mask(String(detail)).slice(0, 500)}${res.status === 401 ? '(鉴权失败:请检查 DEEPSEEK_API_KEY 是否有效)' : ''}`,
+          retryable ? 'network' : 'http',
+          res.status,
+          Math.min(30_000, retryAfterMs)
+        );
       }
-      throw new DeepSeekError(`空响应(finish_reason=${finish || '未知'})`, 'empty');
+      let data: any;
+      try { data = JSON.parse(text); }
+      catch (err) { throw new DeepSeekError(`响应 JSON 无法解析:${err instanceof Error ? err.message : String(err)}`, 'invalid-json'); }
+      const choice = data?.choices?.[0];
+      const message = choice?.message ?? {};
+      const finish = choice?.finish_reason ?? '';
+      const promptTokens = Number(data?.usage?.prompt_tokens ?? 0) || 0;
+      const completionTokens = Number(data?.usage?.completion_tokens ?? 0) || 0;
+      this.totalPromptTokens += promptTokens;
+      this.totalCompletionTokens += completionTokens;
+      this.statsFor(type).promptTokens += promptTokens;
+      this.statsFor(type).completionTokens += completionTokens;
+      const content = typeof message.content === 'string' ? message.content : '';
+      if (!content.trim()) {
+        if (finish === 'length') throw new DeepSeekError('EMPTY_OUTPUT_MAX_TOKENS:输出预算被推理耗尽', 'truncated');
+        // Reasoning is an internal trace, not a valid structured or interview answer.
+        if (typeof message.reasoning_content === 'string' && message.reasoning_content.trim()) {
+          throw new DeepSeekError('响应只有 reasoning_content，未返回可用 content', 'empty');
+        }
+        throw new DeepSeekError(`空响应(finish_reason=${finish || '未知'})`, 'empty');
+      }
+      // Non-empty content is not complete when finish_reason=length.
+      if (finish === 'length') throw new DeepSeekError('TRUNCATED_OUTPUT_MAX_TOKENS:响应被 max_tokens 截断', 'truncated', undefined, 0, content);
+      return content;
+    } catch (err) {
+      if (err instanceof DeepSeekError) throw err;
+      if (opts.signal?.aborted) throw new DeepSeekError('已取消', 'cancelled');
+      const m = err instanceof Error ? err.message : String(err);
+      const isTimeout = timedOut() || /timeout|aborted/i.test(m) || /TIMEOUT/i.test(nestedErrorCode(err) ?? '');
+      throw new DeepSeekError(isTimeout ? `请求超时:${this.networkDiagnostic(err)}` : `网络请求失败:${this.networkDiagnostic(err)}`, isTimeout ? 'timeout' : 'network');
+    } finally {
+      cleanup();
     }
-    // Non-empty content is not complete when finish_reason=length.
-    if (finish === 'length') throw new DeepSeekError('TRUNCATED_OUTPUT_MAX_TOKENS:响应被 max_tokens 截断', 'truncated', undefined, 0, content);
-    return content;
   }
 
   get model(): string { return this.modelInUse; }

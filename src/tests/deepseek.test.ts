@@ -99,6 +99,43 @@ test('DeepSeekClient:AbortSignal 立即取消正在进行的 fetch', async () =>
   } finally { restore(); }
 });
 
+test('DeepSeekClient:响应头已到但正文挂起时，总超时仍会取消读取并释放 reader', async () => {
+  let cancelled = false;
+  const restore = installFetch(async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => undefined),
+      cancel: () => { cancelled = true; },
+    });
+    return new Response(body, { headers: { 'content-type': 'application/json' } });
+  });
+  try {
+    const client = new DeepSeekClient(config);
+    const started = Date.now();
+    await assert.rejects(
+      client.chat([{ role: 'user', content: 'x' }], { retries: 0, policy: { timeout: 25 } }),
+      (err: unknown) => err instanceof DeepSeekError && err.code === 'timeout'
+    );
+    assert.ok(Date.now() - started < 500, '正文挂起不能越过请求总超时');
+    assert.equal(cancelled, true, '超时后应取消响应 reader');
+  } finally { restore(); }
+});
+
+test('DeepSeekClient:超过响应体上限立即失败且不重试', async () => {
+  let calls = 0;
+  const restore = installFetch(async () => {
+    calls++;
+    return response('{"ok":true}', 'stop', 200, { 'content-length': String(9 * 1024 * 1024) });
+  });
+  try {
+    const client = new DeepSeekClient(config);
+    await assert.rejects(
+      client.chat([{ role: 'user', content: 'x' }], { retries: 2 }),
+      (err: unknown) => err instanceof DeepSeekError && err.code === 'response-too-large'
+    );
+    assert.equal(calls, 1);
+  } finally { restore(); }
+});
+
 test('DeepSeekClient:网络错误保留脱敏后的 Node 原因码', async () => {
   const restore = installFetch(async () => {
     const cause = Object.assign(new Error('connect refused'), { code: 'ECONNREFUSED' });
@@ -148,5 +185,18 @@ test('DeepSeekClient:推理模型叙述请求一旦截断立即切 chat,不翻�
     assert.equal(await client.chat([{ role: 'user', content: 'markdown' }], { requestType: 'stage5-narrative', maxTokens: 100, hardMaxTokens: 400 }), '完整叙述');
     assert.deepEqual(models, ['deepseek-flash', 'deepseek-chat']);
     assert.deepEqual(maxTokens, [100, 100]);
+  } finally { restore(); }
+});
+
+test('DeepSeekClient:只有 reasoning_content 不是可用面试材料', async () => {
+  const restore = installFetch(async () => new Response(JSON.stringify({
+    choices: [{ message: { content: '', reasoning_content: '{"internal":"trace"}' }, finish_reason: 'stop' }],
+  }), { headers: { 'content-type': 'application/json' } }));
+  try {
+    const client = new DeepSeekClient(config);
+    await assert.rejects(
+      client.chat([{ role: 'user', content: 'x' }], { retries: 0 }),
+      (err: unknown) => err instanceof DeepSeekError && err.code === 'empty' && /reasoning_content/.test(err.message)
+    );
   } finally { restore(); }
 });

@@ -31,7 +31,7 @@ async function main() {
   assert.equal(await call('server'), '{"ok":true}');
   await assert.rejects(call('auth'), (err) => err instanceof DeepSeekError && err.status === 401);
   assert.equal(await call('truncated'), '{"ok":true}');
-  assert.equal(await call('reasoning'), '{"from":"reasoning"}');
+  await assert.rejects(call('reasoning', { retries: 0 }), (err) => err instanceof DeepSeekError && err.code === 'empty');
   await assert.rejects(call('empty', { retries: 0 }), (err) => err instanceof DeepSeekError && err.code === 'empty');
   await assert.rejects(call('malformed', { retries: 0 }), (err) => err instanceof DeepSeekError && err.code === 'invalid-json');
   await assert.rejects(call('timeout', { timeoutMs: 20, retries: 0, policy: { timeout: 20 } }), (err) => err instanceof DeepSeekError && err.code === 'timeout');
@@ -40,7 +40,7 @@ async function main() {
   assert.equal(partial, '{"ok":true}', '部分成功的前一批结果应保持可用');
   await assert.rejects(call('partial-fail', { retries: 0 }), (err) => err instanceof DeepSeekError && err.code === 'invalid-json', '独立失败不应改写前一批结果');
   assert.deepEqual(counts, { normal: 1, rate: 2, server: 2, auth: 1, truncated: 2, reasoning: 1, empty: 1, malformed: 1, timeout: 1, fallback: 2, partial: 2 });
-  console.log(JSON.stringify({ passed: true, counts, cases: ['normal JSON', 'reasoning_content fallback', 'empty content', 'malformed JSON', 'timeout + AbortSignal', '429 + Retry-After', '500 + Retry-After', '401 no retry', 'model-not-found fallback', 'finish_reason=length request-local expansion', 'partial success isolation'] }, null, 2));
+  console.log(JSON.stringify({ passed: true, counts, cases: ['normal JSON', 'reasoning_content rejected', 'empty content', 'malformed JSON', 'timeout + AbortSignal', '429 + Retry-After', '500 + Retry-After', '401 no retry', 'model-not-found fallback', 'finish_reason=length request-local expansion', 'partial success isolation'] }, null, 2));
   await new Promise((resolve) => server.close(resolve));
 }
 
