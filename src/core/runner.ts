@@ -18,6 +18,7 @@ import { runEvaluation } from '../stages/evaluate';
 import { RunMode } from './policy';
 import { writeQualityArtifacts } from './quality';
 import { allocateRunDir, carryForwardIncrement, repoRootOfOutput } from './runs';
+import { invokePipelineGraph } from './pipelineGraph';
 
 /** 阶段事件(0.4.0):供宿主渲染"时间轴 + 节点用时"进度 UI */
 export interface StageEvent {
@@ -149,7 +150,7 @@ function fmtElapsed(ms: number): string {
  * 哈希基于内容(审计 R-1):等长改码、重出题、改答案都会正确失效;
  * 画像哈希含文件清单 + 精读文件内容哈希(增删文件、改精读文件都会刷新)。
  */
-export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }> {
+async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> {
   const root = path.resolve(opts.repoPath);
   if (!fs.existsSync(root)) throw new Error(`仓库路径不存在:${root}`);
   // --out 是用户明确选择的产物位置(旧语义:产物直接写进该目录),允许绝对临时目录;
@@ -460,6 +461,19 @@ export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }>
     return { outDir };
   });
   return opts.logSink ? withLogSink(opts.logSink, runAll) : runAll();
+}
+
+/** Production entrypoint: the full existing deterministic/LLM pipeline runs as
+ * a LangGraph node, with a durable lifecycle checkpoint beside the output root. */
+export async function runPipeline(opts: RunOptions): Promise<{ outDir: string }> {
+  const root = path.resolve(opts.repoPath);
+  const outRoot = path.resolve(opts.outDir ?? path.join(root, 'interview-output'));
+  const runId = `${path.basename(root)}-${Date.now()}-${process.pid}`;
+  return invokePipelineGraph({
+    runId,
+    checkpointPath: path.join(outRoot, '.pipeline-graph.json'),
+    execute: () => runPipelineDirect(opts),
+  });
 }
 
 /** 只跑自评环:对已有产物打分 */
