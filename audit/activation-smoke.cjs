@@ -10,7 +10,8 @@ const path = require('path');
 const assert = require('assert');
 const crypto = require('crypto');
 
-const VSIX = path.resolve(__dirname, '../vscode/code-interview-prep-0.5.2.vsix');
+const extensionVersion = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../vscode/package.json'), 'utf8')).version;
+const VSIX = path.resolve(__dirname, `../vscode/code-interview-prep-${extensionVersion}.vsix`);
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'cip-smoke-'));
 const extracted = path.join(work, 'extension.js');
 

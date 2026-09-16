@@ -15,7 +15,7 @@ import { repoRootOfOutput } from '../core/runs';
 import { diagnoseDeepSeek } from '../core/diagnostics';
 import { TavilyResearch } from '../core/webResearch';
 
-const VERSION = '0.5.2';
+const VERSION = '1.0.0-rc.1';
 
 const USAGE = `代码转面试 ${VERSION} — 读取完整代码仓库,生成真实面试场景全套材料(DeepSeek)
 

@@ -4,7 +4,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const zlib = require('node:zlib');
 const path = require('node:path');
-const VSIX = path.resolve(__dirname, '../vscode/code-interview-prep-0.5.1.vsix');
+const extensionVersion = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../vscode/package.json'), 'utf8')).version;
+const VSIX = path.resolve(__dirname, `../vscode/code-interview-prep-${extensionVersion}.vsix`);
 
 function entries(zipPath) {
   const b = fs.readFileSync(zipPath); let e = -1;
