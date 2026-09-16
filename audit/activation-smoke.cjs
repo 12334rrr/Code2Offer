@@ -138,11 +138,11 @@ const context = {
   assert.strictEqual(typeof ext.activate, 'function', 'extension.js 未导出 activate');
   ext.activate(context);
 
-  const CMDS = ['generate', 'openReport', 'openOutput', 'openQuality', 'openSettings', 'cancelTask', 'dismissTask', 'cancelAll', 'dismissAll'];
+  const CMDS = ['generate', 'diagnose', 'openReport', 'openOutput', 'openQuality', 'openSettings', 'cancelTask', 'dismissTask', 'cancelAll', 'dismissAll'];
   for (const c of CMDS) assert.ok(reg.commands[`codeInterviewPrep.${c}`], `命令未注册: ${c}`);
   assert.strictEqual(reg.outputChannels.length, 1, '输出通道未创建');
   assert.ok(reg.trees['codeInterviewPrep.panel'], '树视图未注册');
-  console.log('✓ [1] activate 成功:9 条命令 + 输出通道 + 树视图全部注册');
+  console.log('✓ [1] activate 成功:10 条命令 + 输出通道 + 树视图全部注册');
 
   // 0.4.0 取消/移除命令:无任务时空参调用必须安全不抛
   await reg.commands['codeInterviewPrep.cancelTask']();
@@ -171,6 +171,10 @@ const context = {
   await reg.commands['codeInterviewPrep.generate']();
   assert.ok(reg.errors.some((e) => /DEEPSEEK_API_KEY/.test(e)), '缺密钥时应给出含 DEEPSEEK_API_KEY 的配置指引');
   console.log('✓ [4] 无密钥生成 → 报错含可操作指引(错误文案直达配置方法)');
+  reg.errors.length = 0;
+  await reg.commands['codeInterviewPrep.diagnose']();
+  assert.ok(reg.errors.some((e) => /DeepSeek 配置无效/.test(e)), '无密钥诊断应明确报告配置无效');
+  console.log('✓ [4b] 无密钥诊断 → 明确报告配置问题,不发起网络请求');
   if (savedKey !== undefined) process.env.DEEPSEEK_API_KEY = savedKey;
 
   // openSettings → 用真实扩展 ID

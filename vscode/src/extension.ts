@@ -6,6 +6,7 @@ import { loadConfig, AppConfig } from '../../src/core/config';
 import { setLogger } from '../../src/core/logger';
 import { RunMode, estimatedCalls, modeLabel } from '../../src/core/policy';
 import { latestRunDir } from '../../src/core/runs';
+import { diagnoseDeepSeek } from '../../src/core/diagnostics';
 
 /**
  * 「Code2Offer(代码转面试)」VSCode 扩展薄壳。
@@ -434,6 +435,28 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('codeInterviewPrep.generate', (item?: vscode.Uri) => runGenerateCommand(item)),
+
+    vscode.commands.registerCommand('codeInterviewPrep.diagnose', async () => {
+      const wss = vscode.workspace.workspaceFolders;
+      if (!wss?.length) {
+        vscode.window.showErrorMessage('请先打开一个工作区，以确定 DeepSeek 配置来源。');
+        return;
+      }
+      const folder = wss.length === 1 ? wss[0].uri : (await vscode.window.showWorkspaceFolderPick({ placeHolder: '选择要测试配置的工作区' }))?.uri;
+      if (!folder) return;
+      let cfg: AppConfig;
+      try { cfg = resolveConfig(folder.fsPath); }
+      catch (err) { vscode.window.showErrorMessage(`DeepSeek 配置无效:${err instanceof Error ? err.message : String(err)}`); return; }
+      const diagnosticChannel = vscode.window.createOutputChannel(`代码转面试诊断 · ${path.basename(folder.fsPath)} · ${new Date().toLocaleTimeString()}`, { log: true });
+      context.subscriptions.push(diagnosticChannel);
+      diagnosticChannel.show(true);
+      diagnosticChannel.appendLine('开始 DeepSeek 最小连接诊断：不读取或发送仓库源码。');
+      const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: '代码转面试：测试 DeepSeek 连接' }, () => diagnoseDeepSeek(cfg));
+      diagnosticChannel.appendLine(JSON.stringify(result, null, 2));
+      const detail = result.steps.map((s) => `${s.ok ? '✓' : '✗'} ${s.id} (${s.elapsedMs}ms)：${s.detail}`).join('\n');
+      if (result.ok) vscode.window.showInformationMessage(`DeepSeek 连接成功。${detail}`);
+      else vscode.window.showErrorMessage(`DeepSeek 连接失败。请查看“${diagnosticChannel.name}”输出。`);
+    }),
 
     // 内联 ✕:取消运行中任务(缓存保留)/ 中止后条目转为「已取消」可回看
     vscode.commands.registerCommand('codeInterviewPrep.cancelTask', async (arg: unknown) => {

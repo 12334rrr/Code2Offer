@@ -66,6 +66,11 @@
         "icon": "$(gear)"
       },
       {
+        "command": "codeInterviewPrep.diagnose",
+        "title": "代码转面试:测试 DeepSeek 连接",
+        "icon": "$(pulse)"
+      },
+      {
         "command": "codeInterviewPrep.cancelTask",
         "title": "代码转面试:取消该任务(缓存保留)",
         "icon": "$(close)"
