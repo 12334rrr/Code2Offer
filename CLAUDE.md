@@ -22,7 +22,7 @@ node dist/cli/index.js rehearse <run目录> --count 5    # 交互排练
 node dist/cli/index.js export-prompts        # 导出全部提示词存档 → docs/prompts/(17 份,含修复环/排练/评委)
 npm test                                     # 构建 + 78 个单元/行为测试(node --test)
 
-# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.5.2)
+# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.7.0;商店要求纯数字点分版本,禁止 -rc/-beta 等预发布号)
 cd vscode && npm run typecheck && node esbuild.js && npx @vscode/vsce package --no-dependencies
 code --install-extension vscode/code-interview-prep-<版本>.vsix
 
