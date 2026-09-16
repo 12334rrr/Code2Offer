@@ -318,7 +318,10 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     banner('阶段 2:覆盖矩阵出题(100 题)');
     stageBegin('questions', '出题(含修复环)');
     const qPath = path.join(outDir, 'questions.json');
-    const s2Hash = shortHash(`v2|${s1Hash}|${sha1(JSON.stringify(cards))}|${sha1(JSON.stringify(knowledge))}|${cfg.model}`);
+    // Generation mode changes the requested quota/batching and therefore must
+    // invalidate an economy preview instead of silently reusing its partial
+    // question bank for a balanced or deep release run.
+    const s2Hash = shortHash(`v3|${opts.mode ?? 'balanced'}|${s1Hash}|${sha1(JSON.stringify(cards))}|${sha1(JSON.stringify(knowledge))}|${cfg.model}`);
     let questions: Question[];
     let questionsReused = false;
     if (stageDone('questions', s2Hash) && fs.existsSync(qPath)) {
