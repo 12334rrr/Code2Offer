@@ -311,8 +311,8 @@ export const STAGE5_WEAKNESS_SYSTEM = `你是求职教练。基于给定材料�
 再附一节"绝对不要说的话"(如"这不是我写的""没时间就没做"等)与替代说法。
 输出 Markdown 正文,不要多余解释。`;
 
-export const STAGE5_DECISIONS_SYSTEM = `你是架构师。基于给定材料撰写《设计决策与选型对比》Markdown:
-对每个设计决策/技术选型(合并知识卡技术栈表与各模块设计决策,取 5-8 个最重要的):
+export const STAGE5_DECISIONS_SYSTEM = `你是架构师。基于给定的一个决策分区撰写《设计决策与选型对比》的一部分 Markdown。完整报告由两个互不重叠的分区确定性合并；本分区只讨论材料里列出的决策/技术选型，写 3-4 个最重要且有代码或配置事实支撑的项目。材料不足 3 个时，宁可如实少写，也不得编造或用空泛八股凑数。
+对本分区每个设计决策/技术选型:
 1. 决策描述 + 代码依据;
 2. 候选方案列表;若候选含抽象层类方案(如 Repository 接口),必须给出最小接口签名草图与换库时需要改动的调用点;
 3. 对比维度表(Markdown 表格:行=方案,列=维度,单元格=客观评级或事实);评级必须附一句判据(如"优=开箱即用,良=需配插件,中=需自写且无社区背书"),未实测的评级要注明"经验判断,未实测",有依据的给关键指标;
@@ -321,6 +321,17 @@ export const STAGE5_DECISIONS_SYSTEM = `你是架构师。基于给定材料撰�
 6. 适用边界:什么场景应反过来选另一个方案;
 7. 面试一句话答法(30 秒内讲完的版本)。
 输出 Markdown 正文,不要多余解释。`;
+
+export function stage5DecisionsPartUser(part: number, material: string): string {
+  return `# 设计决策分区 ${part}/2\n\n${material}\n\n请只输出本分区的设计决策与选型对比正文。`;
+}
+
+/**
+ * A bounded recovery instruction used only after the provider explicitly marks
+ * a Stage 5 response as truncated. Keep it exported so every runtime prompt
+ * remains visible in the prompt package.
+ */
+export const STAGE5_COMPACT_RETRY_USER_SUFFIX = '请在不遗漏已给事实的前提下，用紧凑结构完成输出。';
 
 /* ================= 阶段 6:模拟排练评分 ================= */
 
@@ -552,8 +563,15 @@ ${STAGE2_TOPUP_USER_HINT}
     {
       file: '05d-设计决策对比.md',
       title: '阶段 5d:设计决策与选型对比',
-      description: '每个决策:候选方案 → 维度表 → 客观优劣(含所选缺点)→ 适用边界 → 30 秒答法。',
-      body: `## System\n\n${STAGE5_DECISIONS_SYSTEM}`,
+      description: '将 5-8 个高价值决策分为两个各 3-4 项的有界分区，再确定性合并；每项都含候选方案、维度表、客观优劣、适用边界与 30 秒答法。',
+      body: `## System\n\n${STAGE5_DECISIONS_SYSTEM}\n\n## User 模板\n\n${stage5DecisionsPartUser(1, '<本分区的技术栈条目、模块决策与静态测试证据>')}`,
+    },
+    {
+      file: '05e-总装截断恢复.md',
+      title: '阶段 5e:总装输出截断恢复',
+      description:
+        '仅当 DeepSeek 明确返回 finish_reason=length 时启用一次。不会采纳被截断的首份输出；恢复请求使用同一 System、缩小后的既有证据窗口和以下 User 追加指令。',
+      body: `## User 追加指令\n\n${STAGE5_COMPACT_RETRY_USER_SUFFIX}`,
     },
     {
       file: '06-模拟排练评分.md',

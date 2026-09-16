@@ -10,12 +10,15 @@ import {
   STAGE5_HIGHLIGHTS_SYSTEM,
   STAGE5_WEAKNESS_SYSTEM,
   STAGE5_DECISIONS_SYSTEM,
+  STAGE5_COMPACT_RETRY_USER_SUFFIX,
+  stage5DecisionsPartUser,
 } from '../core/prompts';
 import { renderHtml } from '../report/htmlReport';
 import { JdAnalysis } from './stage4JD';
 import { StageRunContext } from './stage1Read';
-import { log } from '../core/logger';
+import { log, warn } from '../core/logger';
 import { buildQualityReport } from '../core/quality';
+import { DeepSeekError } from '../core/deepseek';
 
 /** Markdown 表格单元格清洗:| 会拆列、换行会断行(LLM 输出里 a || b、O(n|V|) 很常见) */
 export function sanitizeMdCell(s: unknown): string {
@@ -65,6 +68,19 @@ ${cards
 ${JSON.stringify(facts.testEvidence, null, 1)}`;
 }
 
+/** Split the unusually long decisions report at its evidence source, not after
+ * generation. That keeps each model response under the provider's bounded
+ * completion budget while preserving 5-8 total decision analyses. */
+function materialForDecisionPart(knowledge: ProjectKnowledge, cards: ModuleCard[], facts: RepoFacts, part: 0 | 1): string {
+  const stack = (knowledge.技术栈 ?? []).filter((_, index) => index % 2 === part);
+  const selectedCards = cards.filter((_, index) => index % 2 === part).map((card) => ({
+    name: card.name,
+    关键实现: card.关键实现.slice(0, 5),
+    设计决策: card.设计决策,
+  }));
+  return `# 项目定位\n${knowledge.一句话定位}\n\n# 本分区技术栈\n${JSON.stringify(stack, null, 1)}\n\n# 本分区模块决策\n${JSON.stringify(selectedCards, null, 1)}\n\n# 测试证据(静态统计,可直接引用,禁止夸大)\n${JSON.stringify(facts.testEvidence, null, 1)}`;
+}
+
 async function generateMarkdown(
   client: DeepSeekClient,
   cache: DiskCache,
@@ -82,13 +98,25 @@ async function generateMarkdown(
     log(`  [缓存] ${cacheNs}`);
     return cached;
   }
-  const raw = await client.chat(
-    [
-      { role: 'system', content: system },
-      { role: 'user', content: material },
-    ],
-    { requestType: 'stage5-narrative', temperature: 0.4, maxTokens, hardMaxTokens: 10000, signal, mode }
-  );
+  let raw: string;
+  try {
+    raw = await client.chat(
+      [{ role: 'system', content: system }, { role: 'user', content: material }],
+      { requestType: 'stage5-narrative', temperature: 0.4, maxTokens, hardMaxTokens: 10000, signal, mode }
+    );
+  } catch (err) {
+    if (!(err instanceof DeepSeekError) || err.code !== 'truncated') throw err;
+    // A second bounded attempt uses the same audited system prompt but a much
+    // smaller evidence window. Never accept the partial first response.
+    warn(`[总装] ${cacheNs} 输出截断；缩小证据上下文后重试一次`);
+    raw = await client.chat(
+      [{ role: 'system', content: system }, { role: 'user', content: `${material.slice(0, 6000)}\n\n${STAGE5_COMPACT_RETRY_USER_SUFFIX}` }],
+      // Preserve the normal request policy's hard ceiling. In economy mode it
+      // is 7,500 tokens; forcing 6,000 here made a smaller prompt fail even
+      // when the normal bounded retry budget could have completed it.
+      { requestType: 'stage5-narrative', temperature: 0.25, maxTokens: Math.min(6000, maxTokens), hardMaxTokens: 10000, signal, mode }
+    );
+  }
   cache.set(key, raw);
   return raw;
 }
@@ -153,15 +181,18 @@ export async function runStage5(
   fs.mkdirSync(outDir, { recursive: true });
   const material = materialForNarrative(knowledge, cards, facts);
 
-  // 四份叙述稿互不依赖,并行生成(推理模型单次分钟级,串行使总装时长 ×4)
-  log('  并行生成《项目讲解》《亮点与防守》《缺点与改进》《设计决策与选型对比》...');
-  const [narrative, highlights, weaknesses, decisions] = await Promise.all([
+  // 决策稿在事实源处分成两个分区:单个完整决策稿常超出推理模型的
+  // 稳定输出预算。其余三份叙述稿仍可独立并行。
+  log('  并行生成《项目讲解》《亮点与防守》《缺点与改进》及两段《设计决策与选型对比》...');
+  const [narrative, highlights, weaknesses, decisionPart1, decisionPart2] = await Promise.all([
     generateMarkdown(client, cache, '05a-narrative', STAGE5_NARRATIVE_SYSTEM, material, 6000, ctx.signal, ctx.mode),
     generateMarkdown(client, cache, '05b-highlights', STAGE5_HIGHLIGHTS_SYSTEM, material, 6000, ctx.signal, ctx.mode),
     generateMarkdown(client, cache, '05c-weakness', STAGE5_WEAKNESS_SYSTEM, material, 6000, ctx.signal, ctx.mode),
-    generateMarkdown(client, cache, '05d-decisions', STAGE5_DECISIONS_SYSTEM, material, 6000, ctx.signal, ctx.mode),
+    generateMarkdown(client, cache, '05d-decisions-part-1', STAGE5_DECISIONS_SYSTEM, stage5DecisionsPartUser(1, materialForDecisionPart(knowledge, cards, facts, 0)), 4500, ctx.signal, ctx.mode),
+    generateMarkdown(client, cache, '05d-decisions-part-2', STAGE5_DECISIONS_SYSTEM, stage5DecisionsPartUser(2, materialForDecisionPart(knowledge, cards, facts, 1)), 4500, ctx.signal, ctx.mode),
   ]);
-  log('  四份叙述稿生成完毕');
+  const decisions = `${decisionPart1.trim()}\n\n---\n\n${decisionPart2.trim()}`;
+  log('  五份有界叙述稿生成完毕');
 
   // 01 项目讲解 = LLM 叙述 + 仓库事实附录
   const factAppendix = [
