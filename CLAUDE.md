@@ -20,12 +20,12 @@ node dist/cli/index.js generate <仓库> [--jd jd.txt] [--out <固定目录>]   
 node dist/cli/index.js evaluate <run目录>     # DeepSeek 评委自评
 node dist/cli/index.js rehearse <run目录> --count 5    # 交互排练
 node dist/cli/index.js export-prompts        # 导出全部提示词存档 → docs/prompts/(19 份,含修复环/排练/评委)
-npm test                                     # 构建 + 101 个单元/行为测试(node --test)
+npm test                                     # 构建 + 103 个单元/行为测试(node --test)
 node audit/regression-gate.cjs               # 缺陷回归门禁:0.3.0 审计 15 缺陷探针必须全部"不可复现"(CI 同款)
 node audit/s-level-audit.cjs <run目录>        # S 级确定性审计:引用精度/贴合抽样/风险给药/追问闭环/难度分
 node audit/extension-host-e2e.cjs            # 真实 VS Code 宿主端到端 B 组验收(隔离窗口,需 .env 与本机 code.cmd)
 
-# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.9.1;商店要求纯数字点分版本,禁止 -rc/-beta 等预发布号)
+# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.9.2;商店要求纯数字点分版本,禁止 -rc/-beta 等预发布号)
 cd vscode && npm run typecheck && node esbuild.js && npx @vscode/vsce package --no-dependencies
 code --install-extension vscode/code-interview-prep-<版本>.vsix
 
@@ -54,7 +54,7 @@ node audit/activation-smoke.cjs   # 9 项断言;含"包内文件 == 本地构建
 - **输出分离(0.5.2)**:默认每次生成自动新建 `<仓库>/interview-output/runs/run-NNNN` 独立目录(src/core/runs.ts:allocateRunDir/carryForwardIncrement/latestRunDir/repoRootOfOutput)——上一次的 state.json/画像/模块卡/题库/JD/校验断点/.cache 自动携带接续(最终产物与 .run-lock **绝不携带**);显式 `--out` 走旧覆盖语义。日志层 `withLogSink()`(AsyncLocalStorage)把一次运行的整棵异步调用树日志同时路由到「专属 sink + 全局 sink」——扩展据此每次生成自动创建并弹出独立输出通道「代码转面试 · 仓库 · 时刻」,主通道保留完整历史,任务 🗑 时连同通道 dispose;rehearse/evaluate/topup 的仓库根从 run-manifest 反推(repoRootOfOutput)。
 - **阶段事件(0.4.0)**:`RunOptions.onStage` 发结构化事件(profile/read/questions/verify/rewrite/jd/assemble/done × start/done/cached/skip + 用时)。扩展面板据此渲染时间轴:`tasks` Map 支持**多仓库并行任务**,同仓库按输出根去重(误点弹「查看进度/取消并重新开始」),条目内联 ✕ 取消/🗑 移除,1s ticker 刷进行中秒表。CLI 不用 onStage,行为不变。
 - **统一日志**:`src/core/logger.ts`——所有阶段用 `log()/warn()`,扩展注入 LogOutputChannel;不要在 stages 里直接 console.log。
-- **缓存键包含 system 提示词全文**(`stage5Assemble.ts` / `stage2Questions.ts`),verify 门控含 STAGE3 提示词 sha1 且**改记终态哈希**(3.6 给药/引用终检之后的题库内容);`PROMPT_VERSION` 现为 '3'。改提示词任何一字,对应产物缓存立即失效、定向重生成。
+- **缓存键包含 system 提示词全文**(`stage5Assemble.ts` / `stage2Questions.ts`),verify 门控含 STAGE3 提示词 sha1 且**改记终态哈希**(3.6 给药/引用终检之后的题库内容);`PROMPT_VERSION` 现为 '3'。改提示词任何一字,对应产物缓存立即失效、定向重生成。run-manifest 记录 `questionTarget`,evaluate/审计经 `targetFromManifest` 三段式推导(兼容 ≤0.8.1 旧产物)。
 - **引用精度(S 级)**:`MAX_CITE_SPAN = 40`(schemas.ts 单源,审计/校验/消毒/补齐同尺);消毒同时序在 2.7 与 3.6「终检」各跑一次——校验改写会引入新引用;`riskWithoutFix`(schemas 导出)与审计脚本同一把尺子。
 - **分层架构图(0.9.1 v2)**:src/report/archDiagram.ts 由 RepoFacts+模块卡**确定性**推导(入口→路由→模块→数据/配置,空层省略,按文件归属连线),暗色成品级样式(标题区/徽章/虚线层容器/语义边色/图例);阶段 5 落盘 `架构图.svg`+`架构图.drawio` 并**内嵌 index.html 顶部**——SVG 节点带 `data-mod`/`data-id`,报告内点击经事件委托打开右侧词典抽屉(模块→关联题目)。**源码词典**:总装按题目引用抓真实源码摘录(renderHtml `sources`),报告内点击 `文件:行号` 抽屉展示带行号源码+关联题目;零 LLM token。demo/(提交的真实报告)经 demo-pages.yml 自动发布 GitHub Pages;隐私政策/服务条款在 docs/,商店页引用。
 - 横向对比是一级硬要求:`isValidComparison` 严格版(矩形表/非空单元格),不合格块剥除后由 2.5 环补齐。

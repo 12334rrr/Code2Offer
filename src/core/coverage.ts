@@ -191,6 +191,26 @@ export function categoriesFor(target: number = DEFAULT_QUESTION_TARGET): ScaledC
   return scaledCategories(target);
 }
 
+/**
+ * 从 run-manifest 推导该产物的目标题量(evaluate/审计用,0.9.1 发布审计修复):
+ * 1. manifest.questionTarget(0.9.1+ 记录)优先;
+ * 2. 0.8.2~0.9.0 无该字段,但配额=模式默认 → 按 mode 推导;
+ * 3. ≤0.8.1 旧产物(硬性 100)按实际题数兜底——三种历史形态都不误报「题数 ≠ 配额」。
+ */
+export function targetFromManifest(
+  manifest: { mode?: string; toolVersion?: string; questionTarget?: number } | undefined,
+  questions: Question[]
+): number {
+  if (typeof manifest?.questionTarget === 'number' && manifest.questionTarget > 0) {
+    return manifest.questionTarget;
+  }
+  const parts = String(manifest?.toolVersion ?? '').split('.').map((n) => parseInt(n, 10) || 0);
+  const versionNum = (parts[0] ?? 0) * 10000 + (parts[1] ?? 0) * 100 + (parts[2] ?? 0);
+  const atLeast082 = versionNum >= 0 * 10000 + 8 * 100 + 2;
+  if (atLeast082) return questionTargetFor(manifest?.mode || undefined);
+  return questions.length || questionTargetFor(manifest?.mode || undefined);
+}
+
 /** 把类别×难度配额矩阵按 target/100 缩放(两级最大余数法):类别和恰为 target,每类 ≥1,类内难度和 = 类配额;结果缓存 */
 function scaledCategories(target: number): ScaledCategory[] {
   const t = Math.max(10, Math.min(200, Math.round(target)));

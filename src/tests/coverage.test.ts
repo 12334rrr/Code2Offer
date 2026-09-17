@@ -110,3 +110,19 @@ test('trimToQuotaDetailed:按 target 裁剪', () => {
   assert.strictEqual(keep.length, 30);
   assert.strictEqual(droppedOverQuota, 5);
 });
+
+test('targetFromManifest:三种历史形态都不误报', () => {
+  const { targetFromManifest } = require('../core/coverage');
+  const qs60 = Array.from({ length: 60 }, (_, i) => mkQ(`Q${String(i + 1).padStart(2, '0')}`, '核心模块深挖', '基础'));
+  const qs100 = Array.from({ length: 100 }, (_, i) => mkQ(`Q${String(i + 1).padStart(2, '0')}`, '核心模块深挖', '基础'));
+  // 0.9.1+:questionTarget 字段优先
+  assert.strictEqual(targetFromManifest({ toolVersion: '0.9.1', mode: 'balanced', questionTarget: 40 }, qs60), 40);
+  assert.strictEqual(targetFromManifest({ toolVersion: '0.9.1', mode: 'deep' }, qs60), 60, '无字段但 ≥0.8.2 → 模式默认');
+  // 0.8.2~0.9.0:模式默认
+  assert.strictEqual(targetFromManifest({ toolVersion: '0.8.2', mode: 'economy' }, qs60), 20);
+  // ≤0.8.1 旧产物(硬性 100)按实际题数兜底
+  assert.strictEqual(targetFromManifest({ toolVersion: '0.8.1', mode: 'balanced' }, qs100), 100);
+  assert.strictEqual(targetFromManifest({ toolVersion: '0.7.0' }, qs100), 100);
+  // 无 manifest(旧时代):按实际题数
+  assert.strictEqual(targetFromManifest(undefined, qs60), 60);
+});

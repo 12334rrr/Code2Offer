@@ -3,7 +3,7 @@ import * as path from 'path';
 import { DeepSeekClient, parseJsonLoose } from '../core/deepseek';
 import { RepoFacts } from '../core/profiler';
 import { Question, parseCiteRanges, isValidComparison, MAX_CITE_SPAN } from '../core/schemas';
-import { totalQuota, categoriesFor, questionTargetFor } from '../core/coverage';
+import { totalQuota, categoriesFor, targetFromManifest } from '../core/coverage';
 import { deterministicCheck } from './stage3Verify';
 import { DiskCache, PROMPT_VERSION } from '../core/cache';
 import { StageRunContext } from './stage1Read';
@@ -89,14 +89,19 @@ export async function runEvaluation(client: DeepSeekClient, outDir: string, ctx:
 
   /* ---------- 确定性检查(配额按该 run 的模式目标缩放,run-manifest 反推) ---------- */
   const detFailures: string[] = [];
-  const runMode = (() => {
+  // 目标题量推导(0.9.1 发布审计修复):三种历史形态都不误报,逻辑在 coverage.targetFromManifest(单源可测)
+  const manifest = (() => {
     try {
-      return String(JSON.parse(fs.readFileSync(path.join(outDir, 'run-manifest.json'), 'utf8')).mode ?? '') || undefined;
+      return JSON.parse(fs.readFileSync(path.join(outDir, 'run-manifest.json'), 'utf8')) as {
+        mode?: string;
+        toolVersion?: string;
+        questionTarget?: number;
+      };
     } catch {
       return undefined;
     }
   })();
-  const qTarget = questionTargetFor(runMode);
+  const qTarget = targetFromManifest(manifest, questions);
   const quota = totalQuota(qTarget);
   if (questions.length !== quota) detFailures.push(`题数 ${questions.length} ≠ 配额 ${quota}(目标题量 ${qTarget})`);
   for (const cat of categoriesFor(qTarget)) {

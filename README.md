@@ -63,7 +63,7 @@ node dist/cli/index.js evaluate ./你的仓库/interview-output/runs/run-0001
 # 扩展面板搜索「代码转面试」(发布者 DawnofHope)→ Install → 重新加载窗口
 
 # 方式二:本地 vsix(未发布/离线环境)
-code --install-extension vscode/code-interview-prep-0.9.1.vsix
+code --install-extension vscode/code-interview-prep-0.9.2.vsix
 # 安装后必须重载窗口(Ctrl+Shift+P → "重新加载窗口"),命令面板/右键菜单才会出现命令
 
 # 方式三:开发调试
