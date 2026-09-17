@@ -25,7 +25,7 @@ node audit/regression-gate.cjs               # 缺陷回归门禁:0.3.0 审计 1
 node audit/s-level-audit.cjs <run目录>        # S 级确定性审计:引用精度/贴合抽样/风险给药/追问闭环/难度分
 node audit/extension-host-e2e.cjs            # 真实 VS Code 宿主端到端 B 组验收(隔离窗口,需 .env 与本机 code.cmd)
 
-# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.9.0;商店要求纯数字点分版本,禁止 -rc/-beta 等预发布号)
+# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.9.1;商店要求纯数字点分版本,禁止 -rc/-beta 等预发布号)
 cd vscode && npm run typecheck && node esbuild.js && npx @vscode/vsce package --no-dependencies
 code --install-extension vscode/code-interview-prep-<版本>.vsix
 
@@ -47,7 +47,7 @@ node audit/activation-smoke.cjs   # 9 项断言;含"包内文件 == 本地构建
 ## 架构要点
 
 - 六阶段管线(`src/core/runner.ts` 编排,`state.json` 输入哈希门控,未变化阶段直接跳过):
-  0 画像(无 LLM,确定性)→ 1 精读(模块并发 3)→ 2 覆盖矩阵出题(**目标题量自适应**:economy 30 / balanced 60 / deep 80,`RunOptions.maxQuestions` 10-100 可覆盖;补题按配额缺口定向)→ 2.5 对比块补齐 / 2.6 要点实质化 / 2.7 引用消毒 → 3 对抗校验(pass/fix/flag/**unverified**,批次解析失败对半拆批重试)→ **3.5 标红题重写**(校验报告随后重算)→ **3.6 风险给药兜底 + 引用终检**(0.8.1)→ 4 JD 加权(可选,形状校验防毒缓存)→ 5 总装(四份文档并行)。
+  0 画像(无 LLM,确定性)→ 1 精读(模块并发 3)→ 2 覆盖矩阵出题(**目标题量自适应**:economy 20 / balanced 40 / deep 60,`RunOptions.maxQuestions` 10-100 可覆盖;补题按配额缺口定向)→ 2.5 对比块补齐 / 2.6 要点实质化 / 2.7 引用消毒 → 3 对抗校验(pass/fix/flag/**unverified**,批次解析失败对半拆批重试)→ **3.5 标红题重写**(校验报告随后重算)→ **3.6 风险给药兜底 + 引用终检**(0.8.1)→ 4 JD 加权(可选,形状校验防毒缓存)→ 5 总装(四份文档并行 + 架构图 + 源码词典)。
 - **门控哈希基于内容**(0.3.0 起):画像 = 文件清单+精读文件内容哈希;精读 = overview+chunks 全文哈希;校验 = 题目全文+分块+提示词+模型。等长改码、重出题、改答案都会正确失效。
 - **运行锁**:同一输出根同时只允许一条管线(进程内 Map + `.run-lock` 锁文件,PID+时间戳,45 分钟过期;0.5.2 起锁在输出根,自动独立目录模式下同一仓库同样只有一条)。
 - **取消**:`RunOptions.abort` 贯穿全部阶段与每个模型请求;扩展把 VSCode CancellationToken 接到它上面。
@@ -56,7 +56,7 @@ node audit/activation-smoke.cjs   # 9 项断言;含"包内文件 == 本地构建
 - **统一日志**:`src/core/logger.ts`——所有阶段用 `log()/warn()`,扩展注入 LogOutputChannel;不要在 stages 里直接 console.log。
 - **缓存键包含 system 提示词全文**(`stage5Assemble.ts` / `stage2Questions.ts`),verify 门控含 STAGE3 提示词 sha1 且**改记终态哈希**(3.6 给药/引用终检之后的题库内容);`PROMPT_VERSION` 现为 '3'。改提示词任何一字,对应产物缓存立即失效、定向重生成。
 - **引用精度(S 级)**:`MAX_CITE_SPAN = 40`(schemas.ts 单源,审计/校验/消毒/补齐同尺);消毒同时序在 2.7 与 3.6「终检」各跑一次——校验改写会引入新引用;`riskWithoutFix`(schemas 导出)与审计脚本同一把尺子。
-- **分层架构图(0.9.0)**:src/report/archDiagram.ts 由 RepoFacts+模块卡**确定性**推导(入口→路由→模块→数据/配置,空层省略,按文件归属连线),阶段 5 落盘 `架构图.svg`+`架构图.drawio`——零 token、零幻觉;demo/(提交的真实报告)经 demo-pages.yml 自动发布 GitHub Pages 作免安装试用;隐私政策/服务条款在 docs/,商店页引用。
+- **分层架构图(0.9.1 v2)**:src/report/archDiagram.ts 由 RepoFacts+模块卡**确定性**推导(入口→路由→模块→数据/配置,空层省略,按文件归属连线),暗色成品级样式(标题区/徽章/虚线层容器/语义边色/图例);阶段 5 落盘 `架构图.svg`+`架构图.drawio` 并**内嵌 index.html 顶部**——SVG 节点带 `data-mod`/`data-id`,报告内点击经事件委托打开右侧词典抽屉(模块→关联题目)。**源码词典**:总装按题目引用抓真实源码摘录(renderHtml `sources`),报告内点击 `文件:行号` 抽屉展示带行号源码+关联题目;零 LLM token。demo/(提交的真实报告)经 demo-pages.yml 自动发布 GitHub Pages;隐私政策/服务条款在 docs/,商店页引用。
 - 横向对比是一级硬要求:`isValidComparison` 严格版(矩形表/非空单元格),不合格块剥除后由 2.5 环补齐。
 - 引用语义:行数 = `splitFileLines`(去尾空行),边界 `1 ≤ start ≤ end ≤ total`;校验断点带输入指纹,题库重生成自动作废。
 - **测试**:`npm test`(build 后跑 `node --test "dist/tests/*.test.js"`,99 个用例,覆盖 config 优先级/端点绑定、gitignore 语义、敏感清单、引用边界、配额缺口、自适应题量缩放、CLI 旗标、HTML 无内联事件、runs 目录分配/增量携带、logger 上下文隔离等)。修复行为先在 tests 里加断言。

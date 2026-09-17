@@ -4,7 +4,7 @@ import * as crypto from 'crypto';
 import { DeepSeekClient } from '../core/deepseek';
 import { RepoFacts } from '../core/profiler';
 import { DiskCache, PROMPT_VERSION } from '../core/cache';
-import { ModuleCard, ProjectKnowledge, Question } from '../core/schemas';
+import { ModuleCard, ProjectKnowledge, Question, parseCiteRanges } from '../core/schemas';
 import { buildArchDiagram } from '../report/archDiagram';
 import {
   STAGE5_NARRATIVE_SYSTEM,
@@ -281,6 +281,45 @@ export async function runStage5(
   const flag = questions.filter((q) => q.verified === 'flag').length;
   const unverified = questions.filter((q) => q.verified === 'unverified').length;
   const quality = buildQualityReport(facts, cards, questions).report;
+
+  // 分层架构图(0.9.0,确定性推导,零 token):SVG 内嵌报告 + .drawio 可在 diagrams.net 免费编辑
+  const arch = buildArchDiagram(facts, cards, { repoName: path.basename(facts.root), badge: `${ctx.mode ?? 'balanced'} · ${questions.length} 题` });
+
+  // 源码词典(0.9.1):按引用抓真实源码摘录,报告内点击 文件:行号 即词典式展示
+  const fileLinesCache = new Map<string, string[] | null>();
+  const readFileLines = (file: string): string[] | null => {
+    if (!fileLinesCache.has(file)) {
+      try {
+        const text = fs.readFileSync(path.join(facts.root, file), 'utf-8');
+        const ls = text.split(/\r?\n/);
+        if (ls.length > 1 && ls[ls.length - 1] === '') ls.pop();
+        fileLinesCache.set(file, ls);
+      } catch {
+        fileLinesCache.set(file, null);
+      }
+    }
+    return fileLinesCache.get(file) ?? null;
+  };
+  const sources: Array<{ key: string; file: string; lines: string; code: string }> = [];
+  const seenSource = new Set<string>();
+  for (const q of questions) {
+    for (const c of q.代码依据 ?? []) {
+      const key = `${c.file}|${c.lines}`;
+      if (seenSource.has(key)) continue;
+      seenSource.add(key);
+      const ls = readFileLines(c.file);
+      if (!ls) continue;
+      const ranges = parseCiteRanges(c.lines);
+      if (!ranges) continue;
+      const code = ranges
+        .map(([s, e]) => ls.slice(Math.max(0, s - 1), Math.min(ls.length, e)).join('\n'))
+        .join('\n…\n')
+        .slice(0, 8000);
+      sources.push({ key, file: c.file, lines: c.lines, code });
+    }
+  }
+  log(`  源码词典:${sources.length} 处引用摘录随报告内嵌(点击 文件:行号 即查)`);
+
   const html = renderHtml({
     knowledge,
     questions,
@@ -293,11 +332,11 @@ export async function runStage5(
     generatedAt: new Date().toISOString(),
     // localStorage 命名空间:不同仓库的掌握状态不再互相串扰
     repoKey: crypto.createHash('sha1').update(facts.root).digest('hex').slice(0, 10),
+    arch: { svg: arch.svg, modules: arch.modules },
+    sources,
   });
   fs.writeFileSync(path.join(outDir, 'index.html'), html, 'utf-8');
 
-  // 分层架构图(0.9.0,确定性推导,零 token):SVG 浏览器直开 + .drawio 可在 diagrams.net 免费编辑
-  const arch = buildArchDiagram(facts, cards);
   fs.writeFileSync(path.join(outDir, '架构图.svg'), arch.svg, 'utf-8');
   fs.writeFileSync(path.join(outDir, '架构图.drawio'), arch.drawio, 'utf-8');
   log(`  分层架构图:${arch.summary.layers} 层 / ${arch.summary.nodes} 节点 / ${arch.summary.edges} 边(架构图.svg + 架构图.drawio)`);

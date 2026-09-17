@@ -2,7 +2,7 @@
   "name": "code-interview-prep",
   "displayName": "Code2Offer 代码转面试",
   "description": "读取你的真实代码仓库,生成带 文件:行号 证据、对抗校验不编造的 100 道面试题与全套背诵材料(项目讲解/亮点防守/缺点改进/选型对比/架构图/自测报告)。由 DeepSeek 驱动,含分层架构图导出。",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "publisher": "DawnofHope",
   "license": "MIT",
   "icon": "media/icon128.png",

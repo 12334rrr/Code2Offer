@@ -175,9 +175,10 @@ export function questionTargetFor(mode: string | undefined, override?: number): 
   if (override !== undefined && Number.isFinite(override)) {
     return Math.max(MIN_QUESTION_TARGET, Math.min(100, Math.round(override)));
   }
-  if (mode === 'economy') return 30;
-  if (mode === 'balanced') return 60;
-  if (mode === 'deep') return 80;
+  // 0.9.1:题量再缩——精不在于多;economy 20 / balanced 40 / deep 60
+  if (mode === 'economy') return 20;
+  if (mode === 'balanced') return 40;
+  if (mode === 'deep') return 60;
   return DEFAULT_QUESTION_TARGET;
 }
 

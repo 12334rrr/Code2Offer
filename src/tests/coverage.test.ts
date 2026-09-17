@@ -67,9 +67,9 @@ test('computeDeficitSlots:满配额时无缺口', () => {
 /* ---------------- 0.8.2 自适应题量 ---------------- */
 
 test('questionTargetFor:模式默认与 --questions 覆盖钳制', () => {
-  assert.strictEqual(questionTargetFor('economy'), 30);
-  assert.strictEqual(questionTargetFor('balanced'), 60);
-  assert.strictEqual(questionTargetFor('deep'), 80);
+  assert.strictEqual(questionTargetFor('economy'), 20);
+  assert.strictEqual(questionTargetFor('balanced'), 40);
+  assert.strictEqual(questionTargetFor('deep'), 60);
   assert.strictEqual(questionTargetFor(undefined), 100);
   assert.strictEqual(questionTargetFor('deep', 15), 15);
   assert.strictEqual(questionTargetFor('economy', 5), 11); // 下限 = 类别数(每类保底 1)

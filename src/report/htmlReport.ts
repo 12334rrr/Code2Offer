@@ -16,6 +16,10 @@ export interface HtmlData {
   generatedAt: string;
   /** localStorage 命名空间键(默认按生成时间隔离):不同仓库的进度互不串扰 */
   repoKey?: string;
+  /** 分层架构图(0.9.1):SVG 内嵌报告,节点可点击联动面试题 */
+  arch?: { svg: string; modules: Array<{ nodeId: string; name: string; files: string[] }> };
+  /** 引用处源码摘录(0.9.1,词典式点读):key = `${file}|${lines}` */
+  sources?: Array<{ key: string; file: string; lines: string; code: string }>;
 }
 
 /** HTML 文本转义:覆盖 & < > " '(单引号用于属性内 JS 字符串场景的纵深防御) */
@@ -72,7 +76,10 @@ function searchText(q: Question): string {
 }
 
 function questionCard(q: Question): string {
-  const cites = q.代码依据.map((c) => `<code>${esc(c.file)}:${esc(c.lines)}</code>`).join(' ');
+  // 0.9.1:引用可点击 → 右侧词典式展示该处源码(事件委托,数据在 SOURCES)
+  const cites = q.代码依据
+    .map((c) => `<code class="js-cite" data-key="${esc(c.file)}|${esc(c.lines)}" style="cursor:pointer" title="点击查看源码">${esc(c.file)}:${esc(c.lines)}</code>`)
+    .join(' ');
   const ol = q.答案要点.map((a) => `<li>${esc(a)}</li>`).join('');
   const follows = q.追问链
     .map((f, i) => `<div class="follow">追问${i + 1}:${esc(f.问题)}${f.参考要点 ? ` <span class="follow-points">参考要点:${esc(f.参考要点)}</span>` : ''}</div>`)
@@ -145,6 +152,16 @@ export function renderHtml(data: HtmlData): string {
   const cards = data.questions.map(questionCard).join('\n');
   const catOptions = cats.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
   const oneLiner = (data.knowledge.一句话定位 ?? '').slice(0, 60); // 先截断再转义,防实体被拦腰截断
+
+  // 0.9.1:架构图 + 源码词典数据(嵌入 JSON;`<` 转义防 </script> 提前闭合)
+  const archSvg = data.arch?.svg ?? '';
+  const archModulesJson = JSON.stringify(data.arch?.modules ?? []).replace(/</g, '\\u003c');
+  const sourcesJson = JSON.stringify(
+    Object.fromEntries((data.sources ?? []).map((s) => [s.key, { file: s.file, lines: s.lines, code: s.code }]))
+  ).replace(/</g, '\\u003c');
+  const archHtml = archSvg
+    ? `<section class="arch"><div class="arch-head"><h2>系统总体架构</h2><span>由仓库画像确定性推导(零 token)· 点击节点查看相关面试题 · 编辑:架构图.drawio(diagrams.net 免费)</span></div><div class="arch-wrap">${archSvg}</div></section>`
+    : '';
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -226,7 +243,24 @@ code{background:#f3f4f6;border-radius:4px;padding:1px 5px;font-size:12px;color:#
 .empty{text-align:center;color:var(--muted);padding:40px 0}
 .empty.hidden{display:none}
 footer{color:var(--muted);font-size:12px;padding:10px 24px 30px}
-@media print{.toolbar,.selftest,.card-foot button{display:none}.answer.hidden{display:block}.card{break-inside:avoid}}
+/* ---- 0.9.1 架构图与源码词典 ---- */
+.arch{background:#0B1220;border-radius:12px;padding:10px 10px 14px;margin-bottom:16px}
+.arch-wrap svg{width:100%;height:auto;display:block}
+.arch-head{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;padding:4px 8px 0}
+.arch-head h2{margin:0;font-size:15px;color:#F1F5F9}
+.arch-head span{font-size:12px;color:#7C8DB0}
+.arch-node:hover rect{stroke:#F5C518}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:430px;max-width:94vw;background:var(--card);border-left:2px solid var(--blue);box-shadow:-10px 0 28px rgba(0,0,0,.28);z-index:60;padding:14px 16px;overflow:auto}
+.drawer[hidden]{display:none}
+.drawer-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
+.drawer-head b{font-size:14.5px}
+.drawer .sub{color:var(--muted);font-size:12px;line-height:1.6}
+.src{background:#0B1220;color:#D7E2F0;border-radius:8px;padding:10px 12px;font:12px/1.65 Consolas,"Courier New",monospace;overflow:auto;max-height:58vh;white-space:pre;margin:8px 0}
+.src .ln{color:#4B5B7A;display:inline-block;width:3.2em;user-select:none}
+.mq{display:block;padding:7px 9px;border:1px solid var(--line);border-radius:6px;margin:6px 0;text-decoration:none;color:var(--ink);font-size:13px;line-height:1.5}
+.mq:hover{border-color:var(--blue);background:rgba(37,99,235,.06)}
+code.js-cite:hover{background:#dbeafe;color:var(--blue)}
+@media print{.toolbar,.selftest,.card-foot button{display:none}.answer.hidden{display:block}.card{break-inside:avoid}.drawer{display:none}.arch{break-inside:avoid}}
 </style>
 </head>
 <body>
@@ -265,10 +299,16 @@ footer{color:var(--muted);font-size:12px;padding:10px 24px 30px}
   <aside id="sidebar"></aside>
   <main>
     ${jdHtml}
+    ${archHtml}
     <div id="list">${cards}</div>
     <div class="empty hidden" id="empty">没有匹配的题目</div>
   </main>
 </div>
+
+<aside id="drawer" class="drawer" hidden aria-label="源码与关联题目">
+  <div class="drawer-head"><b id="drawerTitle">详情</b><button type="button" id="drawerClose" class="tbtn" aria-label="关闭">✕ 关闭</button></div>
+  <div id="drawerBody"></div>
+</aside>
 
 <footer>
   自测说明:先点"隐藏答案"通读题目 → 口述作答 → 展开答案对照 → 点"掌握/没掌握"。左侧进度条为各类别掌握率(数据保存在浏览器本地,按仓库隔离)。⚠ 存疑题以 校验报告.md 为准。
@@ -277,7 +317,74 @@ footer{color:var(--muted);font-size:12px;padding:10px 24px 30px}
 <script>
 var DATA = ${dataJson};
 var STORE_KEY = ${JSON.stringify(storeKey)};
+var ARCH = ${archModulesJson};
+var SOURCES = ${sourcesJson};
 var memStore = {};
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function openDrawer(title, html){
+  document.getElementById('drawerTitle').textContent = title;
+  document.getElementById('drawerBody').innerHTML = html;
+  document.getElementById('drawer').hidden = false;
+}
+/* ---- 0.9.1:引用点读(词典式源码)+ 架构节点联动面试题(事件委托) ---- */
+document.addEventListener('click', function(ev){
+  var t = ev.target;
+  var cite = t.closest ? t.closest('.js-cite') : null;
+  if (cite) {
+    var key = cite.getAttribute('data-key');
+    var s = SOURCES[key];
+    if (!s) { openDrawer('源码摘录', '<p class="sub">未找到 ' + escHtml(key) + ' 的摘录(该引用可能在总装时未纳入源码包)。</p>'); return; }
+    var lines = String(s.code).split('\n');
+    var body = '<b>' + escHtml(s.file) + ':' + escHtml(s.lines) + '</b>' +
+      '<p class="sub">仓库真实源码摘录,行号与引用一致;可对照背诵每个要点。</p><pre class="src">';
+    for (var i = 0; i < lines.length; i++) body += '<span class="ln">' + (i + 1) + '</span>' + escHtml(lines[i]) + '\n';
+    body += '</pre>';
+    var qids = [];
+    Array.prototype.forEach.call(document.querySelectorAll('.card'), function(card){
+      var hit = Array.prototype.some.call(card.querySelectorAll('.js-cite'), function(x){ return x.getAttribute('data-key') === key; });
+      if (hit) qids.push(card.id);
+    });
+    if (qids.length) {
+      body += '<p class="sub">关联题目(' + qids.length + '):</p>';
+      qids.forEach(function(id){
+        var h = document.querySelector('#' + id + ' h3.q');
+        body += '<a class="mq" href="#' + id + '"><b>' + id + '</b> ' + escHtml(h ? h.textContent : '') + '</a>';
+      });
+    }
+    openDrawer(s.file + ':' + s.lines, body);
+    return;
+  }
+  var node = t.closest ? t.closest('.arch-node') : null;
+  if (node) {
+    var mod = node.getAttribute('data-mod');
+    var files = [];
+    Array.prototype.forEach.call(ARCH.modules, function(m){ if (m.nodeId === node.getAttribute('data-id')) files = m.files; });
+    var ids = [];
+    Array.prototype.forEach.call(document.querySelectorAll('.card'), function(card){
+      var fs = Array.prototype.map.call(card.querySelectorAll('.js-cite'), function(x){ return x.getAttribute('data-key').split('|')[0]; });
+      var named = card.querySelector('.target') ? card.querySelector('.target').textContent : '';
+      var hit = files.some(function(f){ return fs.some(function(x){ return x.indexOf(f) >= 0 || f.indexOf(x) >= 0; }); });
+      if (!hit && mod && named.indexOf(mod) >= 0) hit = true;
+      if (hit) ids.push(card.id);
+    });
+    var body2 = '<p class="sub">该模块按文件归属关联到以下面试题;点击题号跳转,题目里的代码依据还可再点开源码。</p>';
+    if (files.length) body2 += '<p class="sub">文件:' + escHtml(files.join('、')) + '</p>';
+    if (ids.length) {
+      body2 += '<p class="sub">关联题目(' + ids.length + '):</p>';
+      ids.forEach(function(id){
+        var h = document.querySelector('#' + id + ' h3.q');
+        body2 += '<a class="mq" href="#' + id + '"><b>' + id + '</b> ' + escHtml(h ? h.textContent : '') + '</a>';
+      });
+    } else {
+      body2 += '<p class="sub">暂无直接关联题目。</p>';
+    }
+    openDrawer((mod || '模块') + ' · 面试点', body2);
+    return;
+  }
+  if (t.id === 'drawerClose' || (t.closest && t.closest('#drawerClose'))) {
+    document.getElementById('drawer').hidden = true;
+  }
+});
 function loadStore(){ try { return JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {}; } catch(e){ return memStore; } }
 function saveStore(s){ try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch(e){ memStore = s; } }
 var store = loadStore();

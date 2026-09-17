@@ -487,7 +487,7 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     client.printUsage();
     const quality = writeQualityArtifacts(outDir, facts, cards, questions, qTarget);
     const manifest = {
-      schemaVersion: 1, toolVersion: '0.9.0', generatedAt: new Date().toISOString(), mode: opts.mode ?? 'balanced',
+      schemaVersion: 1, toolVersion: '0.9.1', generatedAt: new Date().toISOString(), mode: opts.mode ?? 'balanced',
       model: client.model, endpoint: cfg.baseUrl, configSources: cfg.sources, promptVersion: PROMPT_VERSION,
       repository: { root, snapshotHash: facts.snapshotHash ?? currentSnapshot, files: facts.overview.totalFiles, loc: facts.overview.totalLOC },
       ignored: facts.skippedByReason ?? {}, stageHashes: state.stages, stageDurations, usage: client.usage(), cache: cache.stats(), quality,
