@@ -304,11 +304,25 @@ export function coerceQuestion(raw: unknown, id: string, category: string, diffi
 /** 单一事实源:审计脚本(audit/s-level-audit.cjs)与修复环(repairRiskWithoutFix)共用 */
 
 export const RISK_RE = /(风险|缺陷|隐患|坏味道|不足|局限|退化|失效|溢出|竞态|死锁|泄漏|开销|瓶颈|裂点|盲区|代价)/;
-export const FIX_RE = /(改进|修复|应(?:改|调|做|把|在|显式|补|调用)|改为|换成|建议|方案|升级|拆分|校验|加锁|限流|兜底|重试|降级|注入|白名单|转义|验证方式|压测|回归基线)/;
+export const FIX_RE = /(改进|修复|应(?:改|调|做|把|在|显式|补|调用)|改为|换成|建议|方案|升级|拆分|校验|加锁|限流|兜底|重试|降级|注入|白名单|转义|验证方式|压测|回归基线|采用|选择|补上|补齐)/;
 
 /** 该题是否"指出风险但没有任何改进表述"(需要定向修补) */
 export function riskWithoutFix(q: Question): boolean {
   return q.答案要点.some((a) => RISK_RE.test(a)) && !q.答案要点.some((a) => FIX_RE.test(a));
+}
+
+/**
+ * 对比块客观性启发检查(0.9.1):结论钦定"首选/最优/最佳"式单边措辞,
+ * 而整个对比块(表+结论)没有任何缺点/代价表述 → 判定偏袒,触发 2.5 环定向重写。
+ * 形状合格(isValidComparison)但内容偏袒的块,是评委抓到的 S 级缺口。
+ */
+export function comparisonLacksObjectivity(c?: ComparisonBlock): boolean {
+  if (!isValidComparison(c)) return false;
+  const block = c as ComparisonBlock;
+  const verdictBias = /(首选|最优|最佳|性价比最高|完胜|碾压|完爆)/.test(block.结论);
+  const text = [block.结论, ...block.对比表.flat()].join(' ');
+  const hasDrawback = /(缺点|代价|劣势|短板|不足|局限|风险|开销)/.test(text);
+  return verdictBias && !hasDrawback;
 }
 
 /** 旧题库升级(0.8.0):读 questions.json 时把 string 追问归一为 FollowUp、补 难度分 兜底 */

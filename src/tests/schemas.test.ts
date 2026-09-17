@@ -173,3 +173,28 @@ test('0.8.0 行号精度:单条引用跨度 >80 行(文件级引用)被拒,精�
   const multi = { ...wide, 代码依据: [{ file: 'src/a.ts', lines: '1-40,60-90' }] };
   assert.ok(validateQuestion(multi, files).every((e) => !/超过/.test(e)), '多段各自 ≤80 行应通过');
 });
+
+test('0.9.1 comparisonLacksObjectivity:钦定式结论且无缺点 → 触发重写;均衡块放行', () => {
+  const { comparisonLacksObjectivity } = require('../core/schemas');
+  const good = {
+    候选方案: ['SQLite', 'PostgreSQL'],
+    维度: ['性能', '复杂度', '运维'],
+    对比表: [
+      ['SQLite', '高(单机)', '低', '低;缺点:并发写弱'],
+      ['PostgreSQL', '中', '中', '中;缺点:部署重'],
+    ],
+    结论: '单机嵌入式选 SQLite(缺点:并发写受限);高并发多写应反过来选 PostgreSQL。',
+  };
+  assert.strictEqual(comparisonLacksObjectivity(good), false, '含缺点表述的均衡块放行');
+  const biased = {
+    ...good,
+    对比表: [
+      ['SQLite', '高', '低', '低'],
+      ['PostgreSQL', '中', '中', '中'],
+    ],
+    结论: 'SQLite 是首选,性价比最高。',
+  };
+  assert.strictEqual(comparisonLacksObjectivity(biased), true, '钦定式结论且全块无缺点 → 偏袒');
+  assert.strictEqual(comparisonLacksObjectivity(undefined), false);
+  assert.strictEqual(comparisonLacksObjectivity({ 候选方案: ['a'], 维度: ['x'], 对比表: [], 结论: '首选' }), false, '形状不合格不在此判');
+});

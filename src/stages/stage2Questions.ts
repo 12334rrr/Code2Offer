@@ -6,6 +6,7 @@ import { Chunk } from '../core/chunker';
 import { DiskCache, PROMPT_VERSION } from '../core/cache';
 import { ModuleCard, ProjectKnowledge, Question, coerceQuestion, hasPresentationIssue, validateQuestion } from '../core/schemas';
 import { Slot, buildSlots, totalQuota, computeDeficitSlots, questionTargetFor } from '../core/coverage';
+import { comparisonLacksObjectivity } from '../core/schemas';
 import { STAGE2_SYSTEM, STAGE2_REPAIR_SYSTEM, STAGE2_CMP_REPAIR_SYSTEM, STAGE2_POINTS_REPAIR_SYSTEM, STAGE2_FLAG_REWRITE_SYSTEM, Stage2BatchInput, stage2BatchUser, stage2RepairUser, stage2CmpRepairUser, stage2PointsRepairUser, stage2FlagRewriteUser, STAGE2_TOPUP_USER_HINT } from '../core/prompts';
 import { requiresComparison } from '../core/coverage';
 import { isValidComparison } from '../core/schemas';
@@ -373,9 +374,12 @@ export async function repairComparisons(
   ctx: StageRunContext = {}
 ): Promise<number> {
   const { excerpts } = deterministicCheck(facts, questions);
-  const need = questions.filter((q) => requiresComparison(q.category) && !isValidComparison(q.对比));
+  // 触发:形状不合格(缺块/坏形状)或 内容偏袒(钦定式结论且全块无缺点,schemas 单源判定)
+  const need = questions.filter(
+    (q) => requiresComparison(q.category) && (!isValidComparison(q.对比) || comparisonLacksObjectivity(q.对比))
+  );
   if (!need.length) return 0;
-  log(`  对比块补齐:${need.length} 题缺合格对比块(${need.map((q) => q.id).join('、')})`);
+  log(`  对比块补齐:${need.length} 题(缺合格对比块或客观性不足:${need.map((q) => q.id).join('、')})`);
   let repaired = 0;
   for (const q of need) {
     if (ctx.signal?.aborted) throw new Error('已取消');
@@ -383,7 +387,8 @@ export async function repairComparisons(
       .map((c) => excerpts.get(`${q.id}|${c.file}|${c.lines}`) ?? '')
       .filter(Boolean)
       .join('\n\n');
-    const material = stage2CmpRepairUser(q.question, q.答案要点, ex);
+    // 当前块内容进材料:模型看得见毛病在哪,缓存键也随块内容变化(不会拿旧缓存反复修补同一块)
+    const material = stage2CmpRepairUser(q.question, q.答案要点, ex, q.对比 ? JSON.stringify(q.对比) : undefined);
     const key = cache.key('cmp-repair', PROMPT_VERSION, STAGE2_CMP_REPAIR_SYSTEM, q.id, material);
     // 命中缓存也要复验形状,防坏缓存长期占位
     let raw = cache.get<string>(key);

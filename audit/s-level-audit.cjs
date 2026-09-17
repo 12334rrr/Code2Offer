@@ -15,7 +15,7 @@ const qs = JSON.parse(fs.readFileSync(path.join(runDir, 'questions.json'), 'utf8
 const facts = JSON.parse(fs.readFileSync(path.join(runDir, 'repo_facts.json'), 'utf8'));
 const root = facts.root;
 // 风险给药与引用精度:直接用产品内单源(与修复环/消毒完全同一把尺子)
-const { riskWithoutFix, MAX_CITE_SPAN } = require('../dist/core/schemas');
+const { riskWithoutFix, MAX_CITE_SPAN, comparisonLacksObjectivity } = require('../dist/core/schemas');
 const report = [];
 const fail = (id, msg) => report.push({ id, ok: false, msg });
 
@@ -59,8 +59,11 @@ if (wide) fail('A1-精度', `${wide} 条引用跨度 >${MAX_CITE_SPAN} 行`);
 
 /* 抽样:答案要点与引用处代码的关键词贴合(去停用词后看代码标识符是否出现) */
 const STOP = new Set(['的','了','在','是','和','与','或','对','为','当','时','中','把','被','并','而','及','这','那','如果','因为','所以','通过','使用','可以','会','不','没','有','无','进行','实现','处理','支持','防止','避免','导致','问题','代码','数据','请求','文件','函数','逻辑','情况','状态','返回','需要','应该','已经','目前','当前','直接','同时','以及','其中','基于','用于','之后','这里','这样','存在','出现','执行','调用','提供','完成','得到','该','本','个','条','次','更','最','也','都','即','等','如','例如']);
-const terms = (text) =>
-  [...new Set((text.match(/[A-Za-z_$][\w$]{2,}|\d+/g) || []).map((s) => s.toLowerCase()))].filter((t) => !STOP.has(t));
+/** 路径/运行时词:来自文件名与命令行,不是文件内容里的标识符(A2 误报源) */
+const PATH_TOKENS = new Set(['node', 'npm', 'npx', 'yarn', 'pnpm', 'package', 'json', 'lock', 'readme', 'license', 'tsconfig', 'env', 'md', 'js', 'ts']);
+const terms = (text, pathStems) =>
+  [...new Set((text.match(/[A-Za-z_$][\w$]{2,}|\d+/g) || []).map((s) => s.toLowerCase()))]
+    .filter((t) => !STOP.has(t) && !PATH_TOKENS.has(t) && !(pathStems && pathStems.has(t)));
 let spotChecked = 0, weakMatch = [];
 {
   const pool = qs.filter((q) => (q.代码依据 || []).length && q.答案要点?.length);
@@ -69,7 +72,12 @@ let spotChecked = 0, weakMatch = [];
     const ex = (q.代码依据 || []).map((c) => excerpt(c.file, c.lines)).filter(Boolean).join('\n').toLowerCase();
     if (!ex) continue;
     spotChecked++;
-    const key = terms(q.答案要点.join(' ')).filter((t) => t.length >= 4);
+    // 该题引用文件名的词干(如 package.json → package/json)是路径词,不算内容词
+    const pathStems = new Set();
+    for (const c of q.代码依据 || []) {
+      for (const stem of c.file.split(/[\\/._-]/)) if (stem.length >= 3) pathStems.add(stem.toLowerCase());
+    }
+    const key = terms(q.答案要点.join(' '), pathStems).filter((t) => t.length >= 4);
     const hit = key.filter((t) => ex.includes(t));
     if (key.length >= 3 && hit.length / key.length < 0.25) {
       weakMatch.push(`${q.id}:${hit.length}/${key.length} 命中(${key.slice(0, 5).join(',')})`);
@@ -88,6 +96,11 @@ else report.push({ id: 'A3-风险给药', ok: true, msg: '指出风险的题均�
 const badFollow = qs.filter((q) => (q.追问链 || []).some((f) => !f.参考要点 || f.参考要点.length < 10));
 if (badFollow.length) fail('A4-追问闭环', `${badFollow.length} 题追问缺参考要点`);
 else report.push({ id: 'A4-追问闭环', ok: true, msg: `${qs.length} 题 × ${qs[0].追问链.length} 条追问全部带参考要点` });
+
+/* ---------- A6 对比块客观性(钦定式结论且全块无缺点 = 偏袒) ---------- */
+const biasedCmp = qs.filter((q) => q.对比 && comparisonLacksObjectivity(q.对比));
+if (biasedCmp.length) fail('A6-对比客观性', `${biasedCmp.length} 题对比块单边钦定/缺点缺失:${biasedCmp.slice(0, 5).map((q) => q.id).join(',')}`);
+else report.push({ id: 'A6-对比客观性', ok: true, msg: `带对比块的题 ${qs.filter((q) => q.对比).length} 题全部通过客观性检查(无钦定式单边结论)` });
 
 /* ---------- A5 难度分 ---------- */
 const noScore = qs.filter((q) => !Number.isFinite(q.难度分) || q.难度分 < 1 || q.难度分 > 10);
