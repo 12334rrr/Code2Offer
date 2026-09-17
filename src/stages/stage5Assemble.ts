@@ -5,6 +5,7 @@ import { DeepSeekClient } from '../core/deepseek';
 import { RepoFacts } from '../core/profiler';
 import { DiskCache, PROMPT_VERSION } from '../core/cache';
 import { ModuleCard, ProjectKnowledge, Question } from '../core/schemas';
+import { buildArchDiagram } from '../report/archDiagram';
 import {
   STAGE5_NARRATIVE_SYSTEM,
   STAGE5_HIGHLIGHTS_SYSTEM,
@@ -294,5 +295,12 @@ export async function runStage5(
     repoKey: crypto.createHash('sha1').update(facts.root).digest('hex').slice(0, 10),
   });
   fs.writeFileSync(path.join(outDir, 'index.html'), html, 'utf-8');
-  log('  产物已写入:01~06 Markdown + index.html');
+
+  // 分层架构图(0.9.0,确定性推导,零 token):SVG 浏览器直开 + .drawio 可在 diagrams.net 免费编辑
+  const arch = buildArchDiagram(facts, cards);
+  fs.writeFileSync(path.join(outDir, '架构图.svg'), arch.svg, 'utf-8');
+  fs.writeFileSync(path.join(outDir, '架构图.drawio'), arch.drawio, 'utf-8');
+  log(`  分层架构图:${arch.summary.layers} 层 / ${arch.summary.nodes} 节点 / ${arch.summary.edges} 边(架构图.svg + 架构图.drawio)`);
+
+  log('  产物已写入:01~06 Markdown + index.html + 架构图');
 }

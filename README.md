@@ -11,6 +11,7 @@
 | `05_设计决策与选型对比.md` | 每个决策:候选方案 × 对比维度 × 客观优劣势(含所选方案缺点)× 适用边界 |
 | `06_速记卡.md` | 考前 30 分钟版 |
 | `index.html` | **单文件可搜索报告**:类别/难度筛选、隐藏答案自测、掌握度统计(localStorage) |
+| `架构图.svg` + `架构图.drawio` | 分层架构图(入口→路由→业务模块→数据/配置);SVG 直开,`.drawio` 在 diagrams.net 免费编辑导出 PPT |
 | `校验报告.md` / `质量门禁报告.md` / `自评报告.md` | 反幻觉校验、确定性质量等级、可选 DeepSeek 评委打分 |
 | `run-manifest.json` / `dependency-manifest.json` | 可复现审计记录、仓库快照、阶段哈希、调用/缓存/降级摘要(不含密钥) |
 | `claim-ledger.json` / `evidence-graph.json` / `quality-report.json` | 主张账本、文件→模块→题目→引用证据图、A+ 门禁指标 |
@@ -62,7 +63,7 @@ node dist/cli/index.js evaluate ./你的仓库/interview-output/runs/run-0001
 # 扩展面板搜索「代码转面试」(发布者 DawnofHope)→ Install → 重新加载窗口
 
 # 方式二:本地 vsix(未发布/离线环境)
-code --install-extension vscode/code-interview-prep-0.8.2.vsix
+code --install-extension vscode/code-interview-prep-0.9.0.vsix
 # 安装后必须重载窗口(Ctrl+Shift+P → "重新加载窗口"),命令面板/右键菜单才会出现命令
 
 # 方式三:开发调试
@@ -148,7 +149,7 @@ cd vscode && npm install && npm run typecheck && node esbuild.js && npx @vscode/
 ```
 src/core/      config / deepseek客户端 / profiler画像 / chunker / coverage矩阵 / prompts / schemas / runs(独立产物目录)/ runner编排
 src/stages/    stage1精读 stage2出题 stage3校验 stage4JD stage5总装 stage6排练 evaluate自评
-src/report/    htmlReport(单文件报告)
+src/report/    htmlReport(单文件报告) / archDiagram(分层架构图:SVG + draw.io,零 token)
 src/cli/       generate / rehearse / evaluate / export-prompts
 vscode/        扩展薄壳(右键生成 + Webview 报告)
 example-demo/  演示仓库(零依赖 Node API:LRU缓存/令牌桶限流/二级索引)

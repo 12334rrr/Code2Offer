@@ -433,8 +433,15 @@ export function activate(context: vscode.ExtensionContext): void {
       config = resolveConfig(folder.fsPath);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const pick = await vscode.window.showErrorMessage(`代码转面试:${msg}`, '打开设置说明');
-      if (pick) vscode.commands.executeCommand('codeInterviewPrep.openSettings');
+      // 新手路径(0.9.0):缺 Key 是最大流失点,直达 Key 申请页而不是只给一句报错
+      const pick = await vscode.window.showErrorMessage(`代码转面试:${msg}`, '申请 DeepSeek Key(免费注册)', '查看 3 分钟上手说明', '打开设置说明');
+      if (pick === '申请 DeepSeek Key(免费注册)') {
+        await vscode.env.openExternal(vscode.Uri.parse('https://platform.deepseek.com/api_keys'));
+      } else if (pick === '查看 3 分钟上手说明') {
+        await vscode.env.openExternal(vscode.Uri.parse('https://github.com/12334rrr/Code2Offer#readme'));
+      } else if (pick === '打开设置说明') {
+        vscode.commands.executeCommand('codeInterviewPrep.openSettings');
+      }
       return;
     }
     spawnTask(folder.fsPath, jdPath, config, mode, maxFiles, explicitOutDir, maxQuestions);

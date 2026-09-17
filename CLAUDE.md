@@ -20,12 +20,12 @@ node dist/cli/index.js generate <仓库> [--jd jd.txt] [--out <固定目录>]   
 node dist/cli/index.js evaluate <run目录>     # DeepSeek 评委自评
 node dist/cli/index.js rehearse <run目录> --count 5    # 交互排练
 node dist/cli/index.js export-prompts        # 导出全部提示词存档 → docs/prompts/(19 份,含修复环/排练/评委)
-npm test                                     # 构建 + 99 个单元/行为测试(node --test)
+npm test                                     # 构建 + 101 个单元/行为测试(node --test)
 node audit/regression-gate.cjs               # 缺陷回归门禁:0.3.0 审计 15 缺陷探针必须全部"不可复现"(CI 同款)
 node audit/s-level-audit.cjs <run目录>        # S 级确定性审计:引用精度/贴合抽样/风险给药/追问闭环/难度分
 node audit/extension-host-e2e.cjs            # 真实 VS Code 宿主端到端 B 组验收(隔离窗口,需 .env 与本机 code.cmd)
 
-# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.8.2;商店要求纯数字点分版本,禁止 -rc/-beta 等预发布号)
+# 扩展:打包 + 安装(版本号在 vscode/package.json 的 version,当前 0.9.0;商店要求纯数字点分版本,禁止 -rc/-beta 等预发布号)
 cd vscode && npm run typecheck && node esbuild.js && npx @vscode/vsce package --no-dependencies
 code --install-extension vscode/code-interview-prep-<版本>.vsix
 
@@ -56,6 +56,7 @@ node audit/activation-smoke.cjs   # 9 项断言;含"包内文件 == 本地构建
 - **统一日志**:`src/core/logger.ts`——所有阶段用 `log()/warn()`,扩展注入 LogOutputChannel;不要在 stages 里直接 console.log。
 - **缓存键包含 system 提示词全文**(`stage5Assemble.ts` / `stage2Questions.ts`),verify 门控含 STAGE3 提示词 sha1 且**改记终态哈希**(3.6 给药/引用终检之后的题库内容);`PROMPT_VERSION` 现为 '3'。改提示词任何一字,对应产物缓存立即失效、定向重生成。
 - **引用精度(S 级)**:`MAX_CITE_SPAN = 40`(schemas.ts 单源,审计/校验/消毒/补齐同尺);消毒同时序在 2.7 与 3.6「终检」各跑一次——校验改写会引入新引用;`riskWithoutFix`(schemas 导出)与审计脚本同一把尺子。
+- **分层架构图(0.9.0)**:src/report/archDiagram.ts 由 RepoFacts+模块卡**确定性**推导(入口→路由→模块→数据/配置,空层省略,按文件归属连线),阶段 5 落盘 `架构图.svg`+`架构图.drawio`——零 token、零幻觉;demo/(提交的真实报告)经 demo-pages.yml 自动发布 GitHub Pages 作免安装试用;隐私政策/服务条款在 docs/,商店页引用。
 - 横向对比是一级硬要求:`isValidComparison` 严格版(矩形表/非空单元格),不合格块剥除后由 2.5 环补齐。
 - 引用语义:行数 = `splitFileLines`(去尾空行),边界 `1 ≤ start ≤ end ≤ total`;校验断点带输入指纹,题库重生成自动作废。
 - **测试**:`npm test`(build 后跑 `node --test "dist/tests/*.test.js"`,99 个用例,覆盖 config 优先级/端点绑定、gitignore 语义、敏感清单、引用边界、配额缺口、自适应题量缩放、CLI 旗标、HTML 无内联事件、runs 目录分配/增量携带、logger 上下文隔离等)。修复行为先在 tests 里加断言。

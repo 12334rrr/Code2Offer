@@ -1,6 +1,18 @@
 # Code2Offer(代码转面试 · Code → Interview Prep)
 
+![CI](https://github.com/12334rrr/Code2Offer/actions/workflows/ci.yml/badge.svg)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-0.9.0-blue)
+
+> **👀 免安装先看真实产物**:[在线 Demo 报告](https://12334rrr.github.io/Code2Offer/)(100 题自测报告,无需安装/无需 Key)
+
 对**当前打开的代码仓库**一键生成真实面试场景的全套材料,由 DeepSeek 驱动:
+
+<!-- 商店截图区:01 时间轴面板动图 | 02 报告自测界面 | 03 标红校验报告(占位,录制后替换)
+![生成进度时间轴](media/screenshot-timeline.png)
+![自测报告](media/screenshot-report.png)
+-->
+
 
 | 产物(默认写入 `<仓库>/interview-output/runs/run-NNNN/`,每次生成一个独立目录) | 内容 |
 |---|---|
@@ -8,6 +20,7 @@
 | `02_百问百答.md` + `index.html` | **100 题**,每题带 `文件:行号` 代码依据、追问链、对比表;HTML 报告可搜索/隐藏答案自测/掌握度统计 |
 | `03_亮点与防守.md` `04_缺点与改进.md` | 亮点→追问→第一人称防守脚本;有准备的缺点话术 |
 | `05_设计决策与选型对比.md` `06_速记卡.md` | 候选方案×维度×客观优劣×适用边界;考前 30 分钟版 |
+| `架构图.svg` + `架构图.drawio` | **分层架构图**(入口→路由→业务模块→数据与配置,按真实文件归属连线);SVG 浏览器直开,`.drawio` 可在 [diagrams.net](https://app.diagrams.net)(免费)里继续编辑、导出 PPT 用图 |
 | `校验报告.md` | 对抗校验:每道题的答案要点对照**引用处代码原文**逐条证伪,标红无依据的主张 |
 
 与"把仓库丢给大模型问一句"的核心差别:先脚本画像(零幻觉事实层)→ 覆盖矩阵强制出题 → 对抗校验环 → 内容缓存 + 阶段门控(重跑只算变化的部分)。
@@ -24,6 +37,7 @@
 
 - 系统环境变量:`setx DEEPSEEK_API_KEY sk-xxx`(Windows)/ 写入 `~/.zshrc`(macOS/Linux),设完重启 VSCode。
 - 可选:`DEEPSEEK_MODEL`(默认 deepseek-chat)、`DEEPSEEK_BASE_URL`(自建网关)、`DEEPSEEK_TIMEOUT_MS`(超时,默认 300000)。
+- **模型兼容性诚实声明**:提示词与请求路由针对 **DeepSeek 家族模型**深度调优(严格 JSON 任务自动路由到稳定模型);任何 OpenAI 兼容端点在协议层可用,但输出质量未经跨模型校准——追求 0.9.0 的 S 级质量请使用 DeepSeek。
 
 > 多根工作区/不想混在项目里:把 `.env` 放进扩展的全局存储目录也可被读到。
 > 被分析仓库自己根目录的 `.env` 也会被读取,但**优先级最低**,且它的 `DEEPSEEK_BASE_URL` 只有在它自己也提供密钥时才生效(见「安全」)。
@@ -101,7 +115,7 @@
 
 ## 安全与隐私
 
-- **只有你的 DeepSeek(或自建网关)端点会收到请求**;无遥测、无任何第三方上报。
+- **只有你的 DeepSeek(或自建网关)端点会收到请求**;无遥测、无任何第三方上报。完整数据流向与密钥保护措施见 [隐私政策](https://github.com/12334rrr/Code2Offer/blob/main/docs/隐私政策.md);使用条款与费用说明见 [服务条款](https://github.com/12334rrr/Code2Offer/blob/main/docs/服务条款.md)。
 - `.env`、私钥、凭据类文件有独立拒绝清单 + 内容级密钥扫描,**绝不进入模型输入**(与仓库 .gitignore 无关)。
 - 100–300KB 文本会先分段扫描高风险密钥；只记录跳过路径和原因，不记录秘密原文。
 - **端点与凭据同源绑定**:克隆的恶意仓库不能靠它自己的 `.env` 把你的密钥引到攻击者地址;`DEEPSEEK_BASE_URL` 强制 HTTPS(`http://localhost` 调试网关例外)。
