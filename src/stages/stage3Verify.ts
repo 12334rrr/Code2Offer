@@ -448,10 +448,12 @@ export async function runStage3(
     checkpointWrite = checkpointWrite.then(() => saveCheckpoint());
     await checkpointWrite;
   };
-  await mapLimit(batches, VERIFY_CONCURRENCY, async (batch, index) => {
+  // 批次解析失败(常见于输出被预算截断)→ 对半拆批重试(深度 ≤2),把 unverified 压到接近 0:
+  // 整批放弃意味着这批题下次运行还要整批重花钱(自跑日志:批 7 失败 → 12 题 unverified)
+  const runVerifyBatch = async (batch: Question[], label: string, depth: number): Promise<void> => {
     if (ctx.signal?.aborted) throw new Error('已取消');
     if (batch.every((q) => results.has(q.id))) return;
-    log(`  对抗校验批次 ${index + 1}/${batches.length}(${batch.length} 题)...`);
+    log(`  对抗校验批次 ${label}(${batch.length} 题)...`);
     try {
       const raw = await client.chat(
         [
@@ -461,16 +463,29 @@ export async function runStage3(
         { requestType: 'stage3-verify', temperature: 0.05, jsonMode: true, maxTokens: 6500, hardMaxTokens: 10000, signal: ctx.signal, mode: ctx.mode }
       );
       const parsed = parseJsonLoose<{ results?: VerificationResult[] }>(raw);
-      for (const r of Array.isArray(parsed.results) ? parsed.results : []) {
+      const list = Array.isArray(parsed?.results) ? parsed.results : [];
+      if (!list.length) throw new Error('模型输出无 results(可能被预算截断)');
+      let applied = 0;
+      for (const r of list) {
         if (!r || typeof r.id !== 'string' || !idSet.has(r.id) || !VERDICTS.has(r.verdict)) continue;
         results.set(r.id, r);
+        applied++;
       }
+      if (!applied) throw new Error('results 中无有效裁决');
       await queueCheckpoint();
     } catch (err) {
       if (String(err instanceof Error ? err.message : err) === '已取消') throw err;
-      warn(`  [警告] 校验批次 ${index + 1} 失败,对应题目将标记为未覆盖(unverified):${err instanceof Error ? err.message : err}`);
+      if (batch.length > 1 && depth < 2) {
+        warn(`  [警告] 批次 ${label} 解析失败(${String(err instanceof Error ? err.message : err).slice(0, 80)}),对半拆批重试`);
+        const mid = Math.ceil(batch.length / 2);
+        await runVerifyBatch(batch.slice(0, mid), `${label}a`, depth + 1);
+        await runVerifyBatch(batch.slice(mid), `${label}b`, depth + 1);
+        return;
+      }
+      warn(`  [警告] 校验批次 ${label} 失败,对应题目将标记为未覆盖(unverified):${err instanceof Error ? err.message : err}`);
     }
-  });
+  };
+  await mapLimit(batches, VERIFY_CONCURRENCY, (batch, index) => runVerifyBatch(batch, String(index + 1), 0));
   await checkpointWrite;
 
   // 应用裁决:LLM 未覆盖 → unverified(不再默认 pass);确定性错误的题不得被模型 pass 覆盖

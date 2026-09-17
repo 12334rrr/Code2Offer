@@ -157,6 +157,8 @@ export interface StageRunContext {
   /** 用户取消信号:阶段间与请求间检查 */
   signal?: AbortSignal;
   mode?: RunMode;
+  /** 目标题量覆盖(0.8.2):不传则按模式默认(economy 30 / balanced 60 / deep 80) */
+  maxQuestions?: number;
 }
 
 export async function runStage1(

@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { RepoFacts, splitFileLines } from './profiler';
 import { ModuleCard, Question, parseCiteRanges } from './schemas';
-import { totalQuota } from './coverage';
+import { totalQuota, DEFAULT_QUESTION_TARGET } from './coverage';
 
 export interface QualityReport {
   generatedAt: string;
@@ -38,12 +38,12 @@ function citeValid(facts: RepoFacts, file: string, lines: string): boolean {
   } catch { return false; }
 }
 
-export function buildQualityReport(facts: RepoFacts, cards: ModuleCard[], questions: Question[]): {
+export function buildQualityReport(facts: RepoFacts, cards: ModuleCard[], questions: Question[], target: number = DEFAULT_QUESTION_TARGET): {
   report: QualityReport;
   claimLedger: unknown[];
   evidenceGraph: { nodes: unknown[]; edges: unknown[] };
 } {
-  const quota = totalQuota();
+  const quota = totalQuota(target);
   const totalCites = questions.reduce((n, q) => n + (q.代码依据?.length ?? 0), 0);
   const validCites = questions.reduce((n, q) => n + (q.代码依据 ?? []).filter((c) => citeValid(facts, c.file, c.lines)).length, 0);
   const citedFiles = new Set(questions.flatMap((q) => (q.代码依据 ?? []).filter((c) => citeValid(facts, c.file, c.lines)).map((c) => c.file)));
@@ -103,8 +103,8 @@ export function buildQualityReport(facts: RepoFacts, cards: ModuleCard[], questi
   return { report, claimLedger, evidenceGraph: { nodes, edges } };
 }
 
-export function writeQualityArtifacts(outDir: string, facts: RepoFacts, cards: ModuleCard[], questions: Question[]): QualityReport {
-  const result = buildQualityReport(facts, cards, questions);
+export function writeQualityArtifacts(outDir: string, facts: RepoFacts, cards: ModuleCard[], questions: Question[], target: number = DEFAULT_QUESTION_TARGET): QualityReport {
+  const result = buildQualityReport(facts, cards, questions, target);
   fs.writeFileSync(path.join(outDir, 'quality-report.json'), JSON.stringify(result.report, null, 2), 'utf8');
   fs.writeFileSync(path.join(outDir, 'claim-ledger.json'), JSON.stringify(result.claimLedger, null, 2), 'utf8');
   fs.writeFileSync(path.join(outDir, 'evidence-graph.json'), JSON.stringify(result.evidenceGraph, null, 2), 'utf8');

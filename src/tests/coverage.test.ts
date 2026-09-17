@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert';
-import { CATEGORIES, totalQuota, trimToQuotaDetailed, computeDeficitSlots } from '../core/coverage';
+import { CATEGORIES, totalQuota, trimToQuotaDetailed, computeDeficitSlots, buildSlots, questionTargetFor, categoriesFor } from '../core/coverage';
 import { Question } from '../core/schemas';
 
 const mkQ = (id: string, category: string, difficulty: Question['difficulty']): Question => ({
@@ -62,4 +62,51 @@ test('computeDeficitSlots:满配额时无缺口', () => {
   }
   const deficit = computeDeficitSlots(qs, emptyCards).filter((s) => s.category === arch.name);
   assert.strictEqual(deficit.length, 0);
+});
+
+/* ---------------- 0.8.2 自适应题量 ---------------- */
+
+test('questionTargetFor:模式默认与 --questions 覆盖钳制', () => {
+  assert.strictEqual(questionTargetFor('economy'), 30);
+  assert.strictEqual(questionTargetFor('balanced'), 60);
+  assert.strictEqual(questionTargetFor('deep'), 80);
+  assert.strictEqual(questionTargetFor(undefined), 100);
+  assert.strictEqual(questionTargetFor('deep', 15), 15);
+  assert.strictEqual(questionTargetFor('economy', 5), 11); // 下限 = 类别数(每类保底 1)
+  assert.strictEqual(questionTargetFor('balanced', 500), 100); // 上限 100
+});
+
+test('scaledCategories(30):矩阵按比例缩放,每类保底 1 题,总数恰为 30', () => {
+  const cats = categoriesFor(30);
+  assert.strictEqual(cats.reduce((s, c) => s + c.quota, 0), 30);
+  assert.ok(cats.every((c) => c.quota >= 1));
+  assert.ok(cats.every((c) => c.difficulties.reduce((s, d) => s + d.count, 0) === c.quota), '类别内难度和 = 类配额');
+  // 广度:全部类别保留
+  assert.strictEqual(cats.length, CATEGORIES.length);
+  // 缩放保序:原配额最大的类别(核心模块深挖,24)缩放后仍是最大
+  const top = cats.find((c) => c.name === '核心模块深挖')!;
+  assert.strictEqual(top.quota, Math.max(...cats.map((c) => c.quota)));
+});
+
+test('totalQuota/buildSlots/computeDeficitSlots 按 target 生效', () => {
+  assert.strictEqual(totalQuota(30), 30);
+  assert.strictEqual(totalQuota(60), 60);
+  assert.strictEqual(totalQuota(100), 100, '默认 target=100 与旧行为一致');
+  const slots = buildSlots(emptyCards, undefined, 30);
+  assert.strictEqual(slots.length, 30);
+  // 缺口计算:占满 30 题后无缺口
+  const filled = slots.map((s, i) => ({ ...mkQ(`Q${String(i + 1).padStart(2, '0')}`, s.category, s.difficulty as Question['difficulty']) }));
+  assert.strictEqual(computeDeficitSlots(filled, emptyCards, undefined, 30).length, 0);
+  // 旧默认调用(不传 target)行为不变
+  assert.strictEqual(buildSlots(emptyCards, undefined).length, 100);
+});
+
+test('trimToQuotaDetailed:按 target 裁剪', () => {
+  const slots = buildSlots(emptyCards, undefined, 30);
+  const qs = slots.map((s, i) => ({ ...mkQ(`Q${String(i + 1).padStart(2, '0')}`, s.category, s.difficulty as Question['difficulty']) }));
+  // 再塞 5 题超配额(复制第一题挤占其配额位)
+  const over = [...qs, ...Array.from({ length: 5 }, (_, i) => ({ ...qs[0], question: `extra${i}` }))];
+  const { keep, droppedOverQuota } = trimToQuotaDetailed(over, 30);
+  assert.strictEqual(keep.length, 30);
+  assert.strictEqual(droppedOverQuota, 5);
 });

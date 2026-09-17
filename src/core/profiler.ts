@@ -753,10 +753,14 @@ function buildTree(files: string[], maxEntries = 300): string {
 
 /* ---------------- 精读清单:决定 LLM 看什么(精准度的关键) ---------------- */
 
+/** 依赖锁文件:提交次数再多也不值得精读/出题(0.8.2:自跑日志中 package-lock 曾靠 git 热点混进精读清单) */
+const LOCKFILE_RE = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|pnpm-lock\.lock|bun\.lockb|composer\.lock|Gemfile\.lock|poetry\.lock|Cargo\.lock|package-lock\.jsonc)$/;
+
 export function selectReadingFiles(facts: RepoFacts, cap = 40): string[] {
   const score = new Map<string, number>();
   const add = (f: string, s: number) => {
     const clean = f.split(':')[0];
+    if (LOCKFILE_RE.test(clean)) return; // 锁文件不参与评分
     score.set(clean, (score.get(clean) ?? 0) + s);
   };
   facts.hotspots.forEach((h, i) => add(h.file, Math.max(1, 30 - i)));
@@ -774,7 +778,7 @@ export function selectReadingFiles(facts: RepoFacts, cap = 40): string[] {
   return [...score.entries()]
     .sort((a, b) => b[1] - a[1])
     .map(([f]) => f)
-    .filter((f) => known.has(f))
+    .filter((f) => known.has(f) && !LOCKFILE_RE.test(f))
     .slice(0, cap);
 }
 

@@ -3,7 +3,7 @@ import * as path from 'path';
 import { DeepSeekClient, parseJsonLoose } from '../core/deepseek';
 import { RepoFacts } from '../core/profiler';
 import { Question, parseCiteRanges, isValidComparison, MAX_CITE_SPAN } from '../core/schemas';
-import { CATEGORIES, totalQuota } from '../core/coverage';
+import { totalQuota, categoriesFor, questionTargetFor } from '../core/coverage';
 import { deterministicCheck } from './stage3Verify';
 import { DiskCache, PROMPT_VERSION } from '../core/cache';
 import { StageRunContext } from './stage1Read';
@@ -87,11 +87,19 @@ export async function runEvaluation(client: DeepSeekClient, outDir: string, ctx:
   const facts = readJsonSafe<RepoFacts>(factsPath, '仓库画像');
   const cache = new DiskCache(path.join(outDir, '.cache'));
 
-  /* ---------- 确定性检查 ---------- */
+  /* ---------- 确定性检查(配额按该 run 的模式目标缩放,run-manifest 反推) ---------- */
   const detFailures: string[] = [];
-  const quota = totalQuota();
-  if (questions.length !== quota) detFailures.push(`题数 ${questions.length} ≠ 配额 ${quota}`);
-  for (const cat of CATEGORIES) {
+  const runMode = (() => {
+    try {
+      return String(JSON.parse(fs.readFileSync(path.join(outDir, 'run-manifest.json'), 'utf8')).mode ?? '') || undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  const qTarget = questionTargetFor(runMode);
+  const quota = totalQuota(qTarget);
+  if (questions.length !== quota) detFailures.push(`题数 ${questions.length} ≠ 配额 ${quota}(目标题量 ${qTarget})`);
+  for (const cat of categoriesFor(qTarget)) {
     const n = questions.filter((q) => q.category === cat.name).length;
     if (n !== cat.quota) detFailures.push(`类别「${cat.name}」${n} 题 ≠ 配额 ${cat.quota}`);
   }

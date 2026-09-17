@@ -57,6 +57,7 @@ interface LiveTask {
   model: string;
   mode: RunMode;
   maxFiles: number;
+  maxQuestions?: number; // 目标题量覆盖(0.8.2):留空按模式默认
   outRoot: string; // 去重/锁定用的输出根
   explicitOutDir?: string; // 用户指定的固定目录(fixed/custom);自动独立目录模式为 undefined
   outDir: string; // 本次实际产物目录;自动模式在管线启动时分配,完成后回填
@@ -163,7 +164,7 @@ export function activate(context: vscode.ExtensionContext): void {
     fireSoon();
   };
 
-  const spawnTask = (repoPath: string, jdPath: string | undefined, config: AppConfig, mode: RunMode, maxFiles: number, explicitOutDir?: string): LiveTask => {
+  const spawnTask = (repoPath: string, jdPath: string | undefined, config: AppConfig, mode: RunMode, maxFiles: number, explicitOutDir?: string, maxQuestions?: number): LiveTask => {
     const outRoot = path.resolve(explicitOutDir ?? path.join(repoPath, 'interview-output'));
     const key = outRoot;
     // 每次生成一个独立输出通道(0.5.2,用户要求:前一次与后一次的输出不堆在同一个控制台)。
@@ -182,6 +183,7 @@ export function activate(context: vscode.ExtensionContext): void {
       model: config.model,
       mode,
       maxFiles,
+      maxQuestions,
       outRoot,
       explicitOutDir,
       outDir: outRoot, // 自动独立目录模式:管线启动时分配 runs/run-NNNN,完成后回填
@@ -239,6 +241,7 @@ export function activate(context: vscode.ExtensionContext): void {
               config,
               mode: task.mode,
               maxFiles: task.maxFiles,
+              maxQuestions: task.maxQuestions,
               outDir: task.explicitOutDir, // undefined = 自动独立目录(每次生成互不覆盖,增量接续)
               logSink: {
                 // 本次运行的所有阶段日志 → 专属通道(与全局通道同时收到,互不影响)
@@ -308,7 +311,7 @@ export function activate(context: vscode.ExtensionContext): void {
       try {
         const cfg = resolveConfig(repoPath);
         // 自动独立目录模式沿用(重新开始 = 再开一个新 run,已完成的增量照常接续)
-        spawnTask(repoPath, existing.jdPath, cfg, existing.mode, existing.maxFiles, existing.explicitOutDir);
+        spawnTask(repoPath, existing.jdPath, cfg, existing.mode, existing.maxFiles, existing.explicitOutDir, existing.maxQuestions);
       } catch (err) {
         vscode.window.showErrorMessage(`代码转面试:${err instanceof Error ? err.message : err}`);
       }
@@ -316,7 +319,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   /** 生成命令主体。reuseJd = 取消并重新开始时代已选过 JD,直接沿用 */
-  async function runGenerateCommand(item?: vscode.Uri, reuseJd?: { jdPath?: string; mode?: RunMode; maxFiles?: number; outDir?: string }): Promise<void> {
+  async function runGenerateCommand(item?: vscode.Uri, reuseJd?: { jdPath?: string; mode?: RunMode; maxFiles?: number; maxQuestions?: number; outDir?: string }): Promise<void> {
     let folder: vscode.Uri | undefined = item;
     if (!folder) {
       const wss = vscode.workspace.workspaceFolders;
@@ -340,10 +343,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
     let mode: RunMode = 'balanced';
     let maxFiles = 40;
+    let maxQuestions: number | undefined;
     let explicitOutDir: string | undefined;
     if (reuseJd?.mode) {
       mode = reuseJd.mode;
       maxFiles = reuseJd.maxFiles ?? maxFiles;
+      maxQuestions = reuseJd.maxQuestions;
       explicitOutDir = reuseJd.outDir;
     } else {
       const modePick = await vscode.window.showQuickPick(
@@ -364,6 +369,14 @@ export function activate(context: vscode.ExtensionContext): void {
       });
       if (maxFilesText === undefined) return;
       maxFiles = Number(maxFilesText);
+      // 目标题量(0.8.2):留空 = 按模式默认(economy 30 / balanced 60 / deep 80),不再硬凑 100
+      const questionsText = await vscode.window.showInputBox({
+        prompt: `目标题量(10~100,留空 = ${modeLabel(mode)}模式默认) · 题少则每题更聚焦好代码与真实痛点对比`,
+        value: '',
+        validateInput: (v) => !v.trim() || (/^\d+$/.test(v.trim()) && Number(v) >= 10 && Number(v) <= 100) ? undefined : '留空,或输入 10~100 的整数',
+      });
+      if (questionsText === undefined) return;
+      maxQuestions = questionsText.trim() ? Number(questionsText.trim()) : undefined;
       // 输出方式(0.5.2):默认每次生成自动新建独立目录,前后两次产物互不覆盖
       const outPick = await vscode.window.showQuickPick(
         [
@@ -424,7 +437,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (pick) vscode.commands.executeCommand('codeInterviewPrep.openSettings');
       return;
     }
-    spawnTask(folder.fsPath, jdPath, config, mode, maxFiles, explicitOutDir);
+    spawnTask(folder.fsPath, jdPath, config, mode, maxFiles, explicitOutDir, maxQuestions);
   }
 
   const resolveTask = (arg: unknown): LiveTask | undefined => {

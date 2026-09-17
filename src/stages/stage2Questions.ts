@@ -5,7 +5,7 @@ import { RepoFacts } from '../core/profiler';
 import { Chunk } from '../core/chunker';
 import { DiskCache, PROMPT_VERSION } from '../core/cache';
 import { ModuleCard, ProjectKnowledge, Question, coerceQuestion, hasPresentationIssue, validateQuestion } from '../core/schemas';
-import { Slot, buildSlots, totalQuota, computeDeficitSlots } from '../core/coverage';
+import { Slot, buildSlots, totalQuota, computeDeficitSlots, questionTargetFor } from '../core/coverage';
 import { STAGE2_SYSTEM, STAGE2_REPAIR_SYSTEM, STAGE2_CMP_REPAIR_SYSTEM, STAGE2_POINTS_REPAIR_SYSTEM, STAGE2_FLAG_REWRITE_SYSTEM, Stage2BatchInput, stage2BatchUser, stage2RepairUser, stage2CmpRepairUser, stage2PointsRepairUser, stage2FlagRewriteUser, STAGE2_TOPUP_USER_HINT } from '../core/prompts';
 import { requiresComparison } from '../core/coverage';
 import { isValidComparison } from '../core/schemas';
@@ -210,12 +210,14 @@ export async function runStage2(
   outDir: string,
   ctx: StageRunContext = {}
 ): Promise<Question[]> {
-  const slots = buildSlots(cards, knowledge);
-  const quota = totalQuota();
-  const targetQuota = ctx.mode === 'economy' ? Math.min(40, quota) : quota;
+  // 自适应题量(0.8.2):质量优先——economy 30 / balanced 60 / deep 80,ctx.maxQuestions 可覆盖
+  const qTarget = questionTargetFor(ctx.mode, ctx.maxQuestions);
+  const slots = buildSlots(cards, knowledge, qTarget);
+  const quota = totalQuota(qTarget);
+  const targetQuota = Math.min(slots.length, quota);
   const targetSlots = slots.slice(0, targetQuota);
   const batchSize = ctx.mode === 'deep' ? 8 : BALANCED_BATCH_SIZE;
-  log(`  覆盖矩阵:${targetSlots.length}/${quota} 个题位(模式 ${ctx.mode ?? 'balanced'})`);
+  log(`  覆盖矩阵:${targetSlots.length} 个题位(模式 ${ctx.mode ?? 'balanced'},目标题量 ${qTarget}${ctx.maxQuestions ? '(用户指定)' : ''})`);
 
   // 文件 → 可引用行数范围索引
   const chunkIndex = new Map<string, { lines: string }>();
@@ -258,7 +260,7 @@ export async function runStage2(
   // 补题轮:按"类别×难度缺口"定向补齐(此前 slots.slice(all.length) 的窗口在批间坍塌后漂移,
   // 丢失的类别永远不补,而补进来的题挤占别的配额——审计 R-5)
   let rounds = 0;
-  let deficit = ctx.mode === 'economy' ? [] : computeDeficitSlots(all, cards, knowledge);
+  let deficit = ctx.mode === 'economy' ? [] : computeDeficitSlots(all, cards, knowledge, qTarget);
   while (deficit.length > 0 && all.length < targetQuota && rounds < MAX_TOPUP_ROUNDS) {
     rounds++;
     log(`  配额缺口 ${deficit.length} 题(${[...new Set(deficit.map((d) => `${d.category}|${d.difficulty}`))].join('、')}),补题第 ${rounds}/${MAX_TOPUP_ROUNDS} 轮 ...`);
@@ -266,7 +268,7 @@ export async function runStage2(
       if (ctx.signal?.aborted) throw new Error('已取消');
       await fillFromBatch(deficit.slice(i, i + batchSize), 'topup');
     }
-    deficit = computeDeficitSlots(all, cards, knowledge);
+    deficit = computeDeficitSlots(all, cards, knowledge, qTarget);
   }
 
   fs.mkdirSync(outDir, { recursive: true });
@@ -317,10 +319,19 @@ export async function topUpToQuota(
   const qPath = path.join(outDir, 'questions.json');
   const existing = fs.existsSync(qPath) ? readQuestionsSafe(qPath) : [];
   if (existing === null) throw new Error('questions.json 损坏,无法补题');
-  const quota = totalQuota();
+  // 目标题量:优先 ctx.maxQuestions,否则按该 run 的模式(run-manifest 反推)
+  const manifestMode = (() => {
+    try {
+      return String(JSON.parse(fs.readFileSync(path.join(outDir, 'run-manifest.json'), 'utf8')).mode ?? '');
+    } catch {
+      return '';
+    }
+  })();
+  const qTarget = questionTargetFor(manifestMode || undefined, ctx.maxQuestions);
+  const quota = totalQuota(qTarget);
 
-  const missingSlots = computeDeficitSlots(existing, cards, knowledge).slice(0, Math.max(0, quota - existing.length));
-  log(`  现有 ${existing.length} 题,按配额缺口 ${missingSlots.length} 题补齐`);
+  const missingSlots = computeDeficitSlots(existing, cards, knowledge, qTarget).slice(0, Math.max(0, quota - existing.length));
+  log(`  现有 ${existing.length} 题,按配额缺口 ${missingSlots.length} 题补齐(目标题量 ${qTarget})`);
 
   const chunkIndex = new Map<string, { lines: string }>();
   for (const c of chunks) chunkIndex.set(c.file, { lines: `1-${c.endLine}` });
@@ -344,7 +355,7 @@ export async function topUpToQuota(
   fs.writeFileSync(qPath, JSON.stringify(existing, null, 2), 'utf-8');
   resetVerifyCheckpoint(outDir);
   log(`  补齐后共 ${existing.length} 题 → questions.json`);
-  const remain = computeDeficitSlots(existing, cards, knowledge);
+  const remain = computeDeficitSlots(existing, cards, knowledge, qTarget);
   if (remain.length) warn(`  [注意] 仍差 ${remain.length} 题,可再运行一次 topup`);
   return existing;
 }

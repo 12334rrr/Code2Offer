@@ -6,7 +6,7 @@ import { DeepSeekClient } from './deepseek';
 import { profileRepo, snapshotRepo } from './profiler';
 import { loadChunks } from './chunker';
 import { DiskCache, PROMPT_VERSION } from './cache';
-import { totalQuota, trimToQuotaDetailed } from './coverage';
+import { totalQuota, trimToQuotaDetailed, questionTargetFor } from './coverage';
 import { Question, isValidComparison, QUESTION_VALIDATION_VERSION, normalizeQuestionLegacy } from './schemas';
 import { STAGE5_NARRATIVE_SYSTEM, STAGE5_HIGHLIGHTS_SYSTEM, STAGE5_WEAKNESS_SYSTEM, STAGE5_DECISIONS_SYSTEM } from './prompts';
 import { log, warn, withLogSink, LogSink } from './logger';
@@ -40,6 +40,8 @@ export interface RunOptions {
   force?: boolean;
   maxFiles?: number;
   mode?: RunMode;
+  /** 目标题量(10-100):不传按模式默认(economy 30 / balanced 60 / deep 80) */
+  maxQuestions?: number;
   /** VSCode 扩展等宿主可通过它接收阶段进度 */
   onProgress?: (msg: string) => void;
   /** 结构化阶段事件:start/done/cached/skip + 用时(扩展侧栏时间轴用) */
@@ -215,6 +217,8 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
       if (carried.length) log(`  [接续] 已携带上次的增量状态(${carried.join('、')}):仓库没变的部分直接命中缓存,不重复花钱`);
     }
     const cache = new DiskCache(path.join(outDir, '.cache'));
+    const qTarget = questionTargetFor(ctx.mode, opts.maxQuestions);
+    ctx.maxQuestions = opts.maxQuestions; // stage2/topup 同源取用(未指定时按 ctx.mode 推默认)
     const statePath = path.join(outDir, 'state.json');
     const state = readStateSafe(statePath);
     const saveState = (name: string, hash: string) => {
@@ -324,7 +328,7 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     // Generation mode changes the requested quota/batching and therefore must
     // invalidate an economy preview instead of silently reusing its partial
     // question bank for a balanced or deep release run.
-    const s2Hash = shortHash(`v5|${opts.mode ?? 'balanced'}|${PROMPT_VERSION}|${QUESTION_VALIDATION_VERSION}|${sha1(STAGE2_SYSTEM)}|${s1Hash}|${sha1(JSON.stringify(cards))}|${sha1(JSON.stringify(knowledge))}|${cfg.model}`);
+    const s2Hash = shortHash(`v6|${qTarget}|${opts.mode ?? 'balanced'}|${PROMPT_VERSION}|${QUESTION_VALIDATION_VERSION}|${sha1(STAGE2_SYSTEM)}|${s1Hash}|${sha1(JSON.stringify(cards))}|${sha1(JSON.stringify(knowledge))}|${cfg.model}`);
     let questions: Question[];
     let questionsReused = false;
     if (stageDone('questions', s2Hash) && fs.existsSync(qPath)) {
@@ -336,9 +340,9 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
       questions = await runStage2(client, cache, facts, cards, knowledge, chunks, outDir, ctx);
       saveState('questions', s2Hash);
     }
-    // 规范化:恰好 100 题(补题救回重复槽位时可能超);未知类别/超配额裁剪并透明化
-    if (questions.length !== totalQuota()) {
-      const { keep, droppedUnknownCategory, droppedOverQuota } = trimToQuotaDetailed(questions);
+    // 规范化:裁到目标题量(补题救回重复槽位时可能超);未知类别/超配额裁剪并透明化
+    if (questions.length !== totalQuota(qTarget)) {
+      const { keep, droppedUnknownCategory, droppedOverQuota } = trimToQuotaDetailed(questions, qTarget);
       if (keep.length !== questions.length || droppedUnknownCategory || droppedOverQuota) {
         warn(
           `  规范化:${questions.length} → ${keep.length} 题(按配额裁剪` +
@@ -481,9 +485,9 @@ async function runPipelineDirect(opts: RunOptions): Promise<{ outDir: string }> 
     reportUsage();
 
     client.printUsage();
-    const quality = writeQualityArtifacts(outDir, facts, cards, questions);
+    const quality = writeQualityArtifacts(outDir, facts, cards, questions, qTarget);
     const manifest = {
-      schemaVersion: 1, toolVersion: '0.8.1', generatedAt: new Date().toISOString(), mode: opts.mode ?? 'balanced',
+      schemaVersion: 1, toolVersion: '0.8.2', generatedAt: new Date().toISOString(), mode: opts.mode ?? 'balanced',
       model: client.model, endpoint: cfg.baseUrl, configSources: cfg.sources, promptVersion: PROMPT_VERSION,
       repository: { root, snapshotHash: facts.snapshotHash ?? currentSnapshot, files: facts.overview.totalFiles, loc: facts.overview.totalLOC },
       ignored: facts.skippedByReason ?? {}, stageHashes: state.stages, stageDurations, usage: client.usage(), cache: cache.stats(), quality,

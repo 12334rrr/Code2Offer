@@ -157,8 +157,92 @@ export interface Slot {
   requireComparison: boolean;
 }
 
-export function totalQuota(): number {
-  return CATEGORIES.reduce((s, c) => s + c.quota, 0);
+export function totalQuota(target: number = DEFAULT_QUESTION_TARGET): number {
+  return scaledCategories(target).reduce((s, c) => s + c.quota, 0);
+}
+
+/* ---------------- 自适应题量(0.8.2):质量优先,不再硬性 100 ----------------
+ * 动机:自跑日志显示硬性 100 会制造大量配额缺口 → 4 轮补题 + 逐批修复,
+ * 白烧 token 且把题位稀释到 audit/docs 等低价值文件上。
+ * economy 30 / balanced 60 / deep 80;--questions 可覆盖(10-100)。
+ * 矩阵按比例缩放(每类保底 1 题),覆盖广度不丢。 */
+
+export const DEFAULT_QUESTION_TARGET = 100;
+/** 下限 = 类别数(每类保底 1 题,11 类 → 11) */
+export const MIN_QUESTION_TARGET = CATEGORIES.length;
+
+export function questionTargetFor(mode: string | undefined, override?: number): number {
+  if (override !== undefined && Number.isFinite(override)) {
+    return Math.max(MIN_QUESTION_TARGET, Math.min(100, Math.round(override)));
+  }
+  if (mode === 'economy') return 30;
+  if (mode === 'balanced') return 60;
+  if (mode === 'deep') return 80;
+  return DEFAULT_QUESTION_TARGET;
+}
+
+type ScaledCategory = (typeof CATEGORIES)[number];
+
+const scaledCache = new Map<number, ScaledCategory[]>();
+
+/** 按目标题量取缩放后的类别矩阵(evaluate 等外部消费方用) */
+export function categoriesFor(target: number = DEFAULT_QUESTION_TARGET): ScaledCategory[] {
+  return scaledCategories(target);
+}
+
+/** 把类别×难度配额矩阵按 target/100 缩放(两级最大余数法):类别和恰为 target,每类 ≥1,类内难度和 = 类配额;结果缓存 */
+function scaledCategories(target: number): ScaledCategory[] {
+  const t = Math.max(10, Math.min(200, Math.round(target)));
+  const hit = scaledCache.get(t);
+  if (hit) return hit;
+  const factor = t / DEFAULT_QUESTION_TARGET;
+
+  // 类级:floor + 最大余数补足,和恰为 t
+  const catTargets = CATEGORIES.map((c) => ({ c, exact: c.quota * factor, base: Math.max(1, Math.floor(c.quota * factor)) }));
+  let sum = catTargets.reduce((s, x) => s + x.base, 0);
+  const byFrac = [...catTargets].sort((a, b) => (b.exact - Math.floor(b.exact)) - (a.exact - Math.floor(a.exact)));
+  let i = 0;
+  while (sum < t) {
+    byFrac[i % byFrac.length].base++;
+    sum++;
+    i++;
+  }
+  const byBaseDesc = [...catTargets].sort((a, b) => b.base - a.base);
+  let j = 0;
+  while (sum > t && byBaseDesc.some((x) => x.base > 1)) {
+    const x = byBaseDesc[j % byBaseDesc.length];
+    if (x.base > 1) {
+      x.base--;
+      sum--;
+    }
+    j++;
+  }
+
+  const out: ScaledCategory[] = catTargets.map(({ c, base }) => {
+    // 类内:难度按 base/c.quota 比例分配,和恰为 base
+    const ds = c.difficulties.map((d) => ({ count: d.count, base: Math.floor((d.count / c.quota) * base) }));
+    let dsum = ds.reduce((s, x) => s + x.base, 0);
+    const dfs = [...ds].sort((a, b) => ((b.count / c.quota) * base - b.base) - ((a.count / c.quota) * base - a.base));
+    let k = 0;
+    while (dsum < base) {
+      dfs[k % dfs.length].base++;
+      dsum++;
+      k++;
+    }
+    const byD = [...ds].sort((a, b) => b.base - a.base);
+    let m = 0;
+    while (dsum > base && byD.some((x) => x.base > 0)) {
+      const x = byD[m % byD.length];
+      if (x.base > 0) {
+        x.base--;
+        dsum--;
+      }
+      m++;
+    }
+    return { ...c, quota: base, difficulties: c.difficulties.map((d, idx) => ({ ...d, count: ds[idx].base })) };
+  });
+  scaledCache.set(t, out);
+  return out;
 }
 
 // 类别枚举注册进 schemas 的运行时校验(单一事实源在这里,避免循环导入)
@@ -181,13 +265,13 @@ export function trimToQuota(questions: Question[]): Question[] {
 }
 
 /** trimToQuota 的详细版:同时返回被裁数量(未知类别 / 超配额),供日志透明化 */
-export function trimToQuotaDetailed(questions: Question[]): {
+export function trimToQuotaDetailed(questions: Question[], target: number = DEFAULT_QUESTION_TARGET): {
   keep: Question[];
   droppedUnknownCategory: number;
   droppedOverQuota: number;
 } {
   const quotaMap = new Map<string, number>();
-  for (const c of CATEGORIES) {
+  for (const c of scaledCategories(target)) {
     for (const d of c.difficulties) quotaMap.set(`${c.name}|${d.level}`, d.count);
   }
   const seen = new Map<string, number>();
@@ -209,7 +293,7 @@ export function trimToQuotaDetailed(questions: Question[]): {
       droppedOverQuota++;
     }
   }
-  return { keep: keep.slice(0, totalQuota()), droppedUnknownCategory, droppedOverQuota };
+  return { keep: keep.slice(0, totalQuota(target)), droppedUnknownCategory, droppedOverQuota };
 }
 
 /**
@@ -217,8 +301,8 @@ export function trimToQuotaDetailed(questions: Question[]): {
  * runStage2 的补题轮与 topUpToQuota 共用同一算法——
  * 此前两处各写一套"从 slots 顺序切片",批间坍塌后窗口漂移,丢失的类别永远不补(审计 R-5)。
  */
-export function computeDeficitSlots(questions: Question[], cards: ModuleCard[], knowledge?: ProjectKnowledge): Slot[] {
-  const slots = buildSlots(cards, knowledge);
+export function computeDeficitSlots(questions: Question[], cards: ModuleCard[], knowledge?: ProjectKnowledge, target: number = DEFAULT_QUESTION_TARGET): Slot[] {
+  const slots = buildSlots(cards, knowledge, target);
   const used = new Map<string, number>();
   const knownCats = new Set(CATEGORIES.map((c) => c.name));
   for (const q of questions) {
@@ -245,8 +329,8 @@ function shuffleStable<T>(arr: T[], salt: number): T[] {
     .map((e) => e.x);
 }
 
-/** 由模块卡 + 项目知识卡生成 100 个题位(配额由 CATEGORIES 硬性保证) */
-export function buildSlots(cards: ModuleCard[], knowledge?: ProjectKnowledge): Slot[] {
+/** 由模块卡 + 项目知识卡生成题位(配额按 target 缩放,每类保底 1 题) */
+export function buildSlots(cards: ModuleCard[], knowledge?: ProjectKnowledge, target: number = DEFAULT_QUESTION_TARGET): Slot[] {
   const slots: Slot[] = [];
   const moduleTargets = cards.length
     ? cards
@@ -275,7 +359,7 @@ export function buildSlots(cards: ModuleCard[], knowledge?: ProjectKnowledge): S
 
   let cmpIdx = 0;
   let deepIdx = 0;
-  for (const cat of CATEGORIES) {
+  for (const cat of scaledCategories(target)) {
     for (const d of cat.difficulties) {
       for (let i = 0; i < d.count; i++) {
         let target = '项目整体';

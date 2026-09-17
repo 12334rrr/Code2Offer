@@ -15,15 +15,16 @@ import { repoRootOfOutput } from '../core/runs';
 import { diagnoseDeepSeek } from '../core/diagnostics';
 import { TavilyResearch } from '../core/webResearch';
 
-const VERSION = '0.8.1';
+const VERSION = '0.8.2';
 
 const USAGE = `代码转面试 ${VERSION} — 读取完整代码仓库,生成真实面试场景全套材料(DeepSeek)
 
 用法:
-  code2offer generate <仓库路径> [--jd <岗位描述.txt>] [--out <固定输出目录>] [--mode economy|balanced|deep] [--force] [--max-files <n>]
+  code2offer generate <仓库路径> [--jd <岗位描述.txt>] [--out <固定输出目录>] [--mode economy|balanced|deep] [--force] [--max-files <n>] [--questions <n>]
       生成全套材料:项目讲解 / 百问百答(含横向对比) / 亮点防守 / 缺点改进 / 设计决策对比 / index.html 报告
       默认每次生成都新建独立目录 <仓库>/interview-output/runs/run-NNNN:前后两次产物互不覆盖,
       增量缓存/断点自动从上一次接续(仓库没变的部分零成本);--out 指定固定目录时沿用旧覆盖语义
+      目标题量按模式自适应(economy 30 / balanced 60 / deep 80,质量优先不硬凑 100);--questions 10-100 可覆盖
 
   code2offer rehearse <输出目录> [--count <n>] [--category <类别>] [--top20]
       模拟面试排练:逐题提问 → 你作答 → DeepSeek 评分+追问 → 记录弱项
@@ -53,7 +54,7 @@ const USAGE = `代码转面试 ${VERSION} — 读取完整代码仓库,生成真
 `;
 
 /** 值旗标(消耗下一个参数);其余 --xxx 一律按布尔处理 */
-const VALUE_FLAGS = new Set(['jd', 'out', 'mode', 'max-files', 'count', 'category', 'query']);
+const VALUE_FLAGS = new Set(['jd', 'out', 'mode', 'max-files', 'questions', 'count', 'category', 'query']);
 
 export interface ParsedArgs {
   flags: Record<string, string | boolean>;
@@ -133,6 +134,7 @@ async function main(): Promise<void> {
         outDir: typeof flags.out === 'string' ? flags.out : undefined,
         force: flags.force === true,
         maxFiles: requireNumber(flags, 'max-files'),
+        maxQuestions: requireNumber(flags, 'questions'),
         mode: requireMode(flags),
         host: 'cli',
       });
@@ -173,7 +175,7 @@ async function main(): Promise<void> {
       const { chunks } = loadChunks(facts.root, facts.readingPlan);
       const cfg = loadConfig({ trustedDirs: [process.cwd(), toolRootDir()], repoDir: repoRootOfOutput(outDir) });
       const client = new DeepSeekClient(cfg);
-      await topUpToQuota(client, facts, cards, knowledge, chunks, outDir);
+      await topUpToQuota(client, facts, cards, knowledge, chunks, outDir, { maxQuestions: requireNumber(flags, 'questions') });
       client.printUsage();
       console.log('提示:重新运行 generate 将继续执行校验与总装(出题阶段会被门控跳过)。');
       break;
