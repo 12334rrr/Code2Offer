@@ -5,19 +5,31 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+# 同一分支的新 push 取消还在跑的旧 run,省额度也出结果更快
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
+          # 两条 lockfile 都纳入缓存键(根 + vscode 子包)
+          cache-dependency-path: |
+            package-lock.json
+            vscode/package-lock.json
 
-      # ---- 核心库:构建 + 全量单测(78+ 契约/行为用例,不需要 API 密钥) ----
+      # ---- 核心库:构建 + 全量单测(不需要 API 密钥) ----
       - run: npm ci
       - run: npm test
 
@@ -26,6 +38,12 @@ jobs:
 
       # ---- 离线合约测试(mock API,不需要密钥) ----
       - run: node audit/mock-api-contract.cjs
+
+      # ---- 提示词存档一致性:代码里的提示词必须与 docs/prompts 逐字节一致(长期要求 #1) ----
+      - name: 提示词存档一致性
+        run: |
+          node dist/cli/index.js export-prompts "$RUNNER_TEMP/prompts-expected"
+          diff -r docs/prompts "$RUNNER_TEMP/prompts-expected"
 
       # ---- 扩展:类型检查 + 打包 + 发布产物验证 ----
       - run: npm ci
@@ -40,3 +58,11 @@ jobs:
       # ---- vsix 内容白名单/密钥检查 + 无头激活冒烟(解包真实 bundle 走全路径) ----
       - run: node audit/vsix-content-check.cjs
       - run: node audit/activation-smoke.cjs
+
+      # ---- 把构建好的 vsix 留下来:发布时直接从 CI 产物下载 ----
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vsix-${{ github.sha }}
+          path: vscode/*.vsix
+          retention-days: 14
+          if-no-files-found: error
