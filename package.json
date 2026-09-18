@@ -19,7 +19,7 @@
     "export-prompts": "node dist/cli/index.js export-prompts docs/prompts",
     "demo": "npm run build && node dist/cli/index.js generate ./example-demo --jd example-demo/jd.txt",
     "demo:rehearse": "node dist/cli/index.js rehearse ./example-demo/interview-output --count 3",
-    "test": "npm run clean:dist && npm run build && node --test \"dist/tests/*.test.js\"",
+    "test": "npm run clean:dist && npm run build && node scripts/run-tests.cjs",
     "test:mock-api": "npm run build && node audit/mock-api-contract.cjs",
     "test:performance": "npm run build && node audit/performance-mock.cjs",
     "test:extension-host": "node audit/extension-host-smoke.cjs",

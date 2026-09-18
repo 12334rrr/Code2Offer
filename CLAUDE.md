@@ -20,7 +20,7 @@ node dist/cli/index.js generate <仓库> [--jd jd.txt] [--out <固定目录>]   
 node dist/cli/index.js evaluate <run目录>     # DeepSeek 评委自评
 node dist/cli/index.js rehearse <run目录> --count 5    # 交互排练
 node dist/cli/index.js export-prompts        # 导出全部提示词存档 → docs/prompts/(19 份,含修复环/排练/评委)
-npm test                                     # 构建 + 103 个单元/行为测试(node --test)
+npm test                                     # 构建 + 103 个单元/行为测试(经 scripts/run-tests.cjs 启动——跨 Node 版本兼容,别改回 node --test "glob",20.x 不展开引号 glob、24.x 目录参数失效)
 node audit/regression-gate.cjs               # 缺陷回归门禁:0.3.0 审计 15 缺陷探针必须全部"不可复现"(CI 同款)
 node audit/s-level-audit.cjs <run目录>        # S 级确定性审计:引用精度/贴合抽样/风险给药/追问闭环/难度分
 node audit/extension-host-e2e.cjs            # 真实 VS Code 宿主端到端 B 组验收(隔离窗口,需 .env 与本机 code.cmd)
