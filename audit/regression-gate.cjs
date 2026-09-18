@@ -13,7 +13,8 @@ try {
 } catch (err) {
   out = String((err && err.stdout) || '') + String((err && err.stderr) || '');
 }
-const m = out.match(/ℹ tests (\d+)[\s\S]*?ℹ fail (\d+)/);
+let m = out.match(/ℹ tests (\d+)[\s\S]*?ℹ fail (\d+)/); // spec reporter(TTY)
+if (!m) m = out.match(/# tests (\d+)[\s\S]*?# fail (\d+)/); // TAP reporter(CI 管道,Node ≥20 非TTY 默认)
 if (!m) {
   console.error('✗ 无法解析探针输出(测试运行器崩溃?):\n' + out.slice(-2000));
   process.exit(1);
@@ -22,7 +23,15 @@ const total = Number(m[1]);
 const reproduced = total - Number(m[2]); // fail = 不可复现 = 已修复;pass = 复现 = 回归
 if (reproduced > 0) {
   console.error(`✗ 回归!${reproduced}/${total} 个历史缺陷探针重新复现(修复被破坏):`);
-  for (const line of out.split('\n')) if (/^✔\s+C\d/.test(line.trim())) console.error('  ' + line.trim());
+  for (const line of out.split('\n')) {
+    const spec = line.trim().match(/^✔\s+(C\d[^\n]*)/);
+    const tap = line.trim().match(/^ok \d+ - (C\d[^\n]*)/);
+    const detail = spec ? spec[1] : tap ? tap[1] : null;
+    if (detail) {
+      console.error('  ' + detail);
+      console.error('::error::缺陷回归:' + detail); // GitHub Actions 注解,便于无日志权限时定位
+    }
+  }
   process.exit(1);
 }
 console.log(`✓ 全部 ${total} 个历史缺陷探针保持"不可复现"——0.3.0 审计缺陷无一回归`);
