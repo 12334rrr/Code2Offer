@@ -190,9 +190,9 @@ const context = {
   assert.ok(reg.errors.some((e) => /未找到面试报告/.test(e)));
   console.log('✓ [6] 未生成时打开报告 → 明确提示"请先生成"');
 
-  // openReport:对示例产物走 Webview + nonce CSP 注入
-  const demoOut = path.resolve(__dirname, '../example-demo/interview-output');
-  assert.ok(fs.existsSync(path.join(demoOut, 'index.html')), '示例产物不存在(测试前置条件)');
+  // openReport:对已提交的 demo 报告走 Webview + nonce CSP 注入(示例产物不进 git,CI 上也能跑)
+  const demoOut = path.resolve(__dirname, '../demo');
+  assert.ok(fs.existsSync(path.join(demoOut, 'index.html')), 'demo/index.html 不存在(测试前置条件)');
   gs.set('codeInterviewPrep.lastOutDir', demoOut);
   reg.panels.length = 0;
   await reg.commands['codeInterviewPrep.openReport']();
