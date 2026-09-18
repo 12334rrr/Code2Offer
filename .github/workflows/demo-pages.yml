@@ -27,6 +27,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions/configure-pages@v6
+        with:
+          enablement: true # 首次运行自动为仓库启用 Pages(源=GitHub Actions)
       - uses: actions/upload-pages-artifact@v5
         with:
           path: demo
